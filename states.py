@@ -10,6 +10,7 @@ class ActivityFSM(StatesGroup):
     waiting_duration = State()
     choosing_context = State()
     entering_new_context = State()
+    choosing_tags = State()
 
 
 class EditFSM(StatesGroup):
@@ -24,3 +25,7 @@ class ContextFSM(StatesGroup):
 
 class GoalFSM(StatesGroup):
     waiting_hours = State()
+
+
+class NoteFSM(StatesGroup):
+    waiting_text = State()

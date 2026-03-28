@@ -142,6 +142,19 @@ def schedule_keyboard(active_hours: List[int]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+PREDEFINED_TAGS = ["важное", "срочное", "рутина", "фокус", "встреча", "отдых"]
+
+
+def tags_keyboard(selected: List[str], act_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for tag in PREDEFINED_TAGS:
+        prefix = "✅" if tag in selected else "☐"
+        builder.button(text=f"{prefix} #{tag}", callback_data=f"tg:{tag}:{act_id}")
+    builder.button(text="💾 Сохранить", callback_data=f"tg_save:{act_id}")
+    builder.adjust(3, 3, 1)
+    return builder.as_markup()
+
+
 def stats_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📅 День",          callback_data="stats:day")
@@ -149,5 +162,6 @@ def stats_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="📊 Месяц",         callback_data="stats:month")
     builder.button(text="🗓 Сетка недели",  callback_data="stats:grid_week")
     builder.button(text="🗓 Сетка месяца",  callback_data="stats:grid_month")
-    builder.adjust(3, 2)
+    builder.button(text="↔️ Сравнение недель", callback_data="stats:compare")
+    builder.adjust(3, 2, 1)
     return builder.as_markup()

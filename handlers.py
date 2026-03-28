@@ -22,6 +22,8 @@ from database import (
     get_context_by_id, rename_context, update_context_color,
     count_context_activities, delete_context,
     get_export_activities, set_goal, delete_goal, get_goals_with_progress,
+    update_activity_tags, save_day_note, get_day_note, delete_day_note,
+    get_week_comparison,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, contexts_keyboard,
@@ -29,10 +31,11 @@ from keyboards import (
     activities_list_keyboard, edit_menu_keyboard, delete_confirm_keyboard,
     contexts_list_keyboard, context_menu_keyboard, color_picker_keyboard,
     ctx_delete_confirm_keyboard, goals_contexts_keyboard, export_keyboard,
+    tags_keyboard, PREDEFINED_TAGS,
 )
 import csv
 import io
-from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM
+from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -312,7 +315,7 @@ async def fsm_chose_context(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Контекст не найден", show_alert=True)
         return
 
-    await add_activity(
+    act_id = await add_activity(
         user_id=callback.from_user.id,
         context_id=ctx_id,
         description=data["description"],
@@ -320,12 +323,14 @@ async def fsm_chose_context(callback: CallbackQuery, state: FSMContext):
         activity_date=date_str,
         hour_slot=hour,
     )
-    await state.clear()
+    await state.update_data(last_act_id=act_id, selected_tags=[], date_str=date_str, hour=hour)
+    await state.set_state(ActivityFSM.choosing_tags)
 
     await callback.message.edit_text(
         f"✅ Записано!\n\n"
-        f"{ctx[2]} {ctx[1]}  ·  {data['description']}  ·  {fmt_dur(data['duration'])}",
-        reply_markup=after_activity_keyboard(date_str, hour),
+        f"{ctx[2]} {ctx[1]}  ·  {data['description']}  ·  {fmt_dur(data['duration'])}\n\n"
+        f"🏷 Добавь теги (необязательно):",
+        reply_markup=tags_keyboard([], act_id),
     )
     await callback.answer()
 
@@ -350,7 +355,7 @@ async def fsm_new_context_name(message: Message, state: FSMContext):
     data = await state.get_data()
     ctx_id, color = await get_or_create_context(message.from_user.id, name)
 
-    await add_activity(
+    act_id = await add_activity(
         user_id=message.from_user.id,
         context_id=ctx_id,
         description=data["description"],
@@ -358,13 +363,89 @@ async def fsm_new_context_name(message: Message, state: FSMContext):
         activity_date=data["date_str"],
         hour_slot=data["hour"],
     )
-    await state.clear()
+    await state.update_data(last_act_id=act_id, selected_tags=[])
+    await state.set_state(ActivityFSM.choosing_tags)
 
     await message.answer(
         f"✅ Записано! Создан контекст {color} {name}\n\n"
-        f"{color} {name}  ·  {data['description']}  ·  {fmt_dur(data['duration'])}",
+        f"{color} {name}  ·  {data['description']}  ·  {fmt_dur(data['duration'])}\n\n"
+        f"🏷 Добавь теги (необязательно):",
+        reply_markup=tags_keyboard([], act_id),
+    )
+
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("tg:"), ActivityFSM.choosing_tags)
+async def cb_tag_toggle(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    tag, act_id = parts[1], int(parts[2])
+    data = await state.get_data()
+    selected = data.get("selected_tags", [])
+    selected = [t for t in selected if t != tag] if tag in selected else selected + [tag]
+    await state.update_data(selected_tags=selected)
+    await callback.message.edit_reply_markup(reply_markup=tags_keyboard(selected, act_id))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tg_save:"), ActivityFSM.choosing_tags)
+async def cb_tag_save(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    data   = await state.get_data()
+    tags   = data.get("selected_tags", [])
+    if tags:
+        await update_activity_tags(act_id, callback.from_user.id, tags)
+    await state.clear()
+    tag_text = "  ".join(f"#{t}" for t in tags) if tags else "без тегов"
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer(
+        f"🏷 {tag_text}",
         reply_markup=after_activity_keyboard(data["date_str"], data["hour"]),
     )
+    await callback.answer()
+
+
+# ── Day notes ──────────────────────────────────────────────────────────────────
+
+@router.message(Command("note"))
+async def cmd_note(message: Message, state: FSMContext):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    user    = await get_user(message.from_user.id)
+    tz      = pytz.timezone(user[2])
+    today   = datetime.now(tz).date().isoformat()
+    existing = await get_day_note(message.from_user.id, today)
+
+    if existing:
+        await message.answer(
+            f"📝 <b>Заметка за {today}:</b>\n\n{existing}\n\n"
+            "Отправь новый текст чтобы изменить, или /note_del чтобы удалить.",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(f"📝 Напиши заметку за {today}:")
+
+    await state.set_state(NoteFSM.waiting_text)
+    await state.update_data(note_date=today)
+
+
+@router.message(NoteFSM.waiting_text)
+async def fsm_note_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await save_day_note(message.from_user.id, data["note_date"], message.text.strip())
+    await state.clear()
+    await message.answer(f"✅ Заметка за {data['note_date']} сохранена.")
+
+
+@router.message(Command("note_del"))
+async def cmd_note_del(message: Message, state: FSMContext):
+    await state.clear()
+    user  = await get_user(message.from_user.id)
+    tz    = pytz.timezone(user[2])
+    today = datetime.now(tz).date().isoformat()
+    await delete_day_note(message.from_user.id, today)
+    await message.answer("✅ Заметка удалена.")
 
 
 # ── Edit / Delete ─────────────────────────────────────────────────────────────
@@ -866,6 +947,39 @@ async def cb_stats(callback: CallbackQuery):
         start = today.replace(day=1)
         end = today
         title = today.strftime("📊 %B %Y")
+    elif period == "compare":
+        w1_end   = today
+        w1_start = today - timedelta(days=today.weekday())
+        w2_end   = w1_start - timedelta(days=1)
+        w2_start = w2_end - timedelta(days=6)
+        rows = await get_week_comparison(
+            callback.from_user.id,
+            w1_start.isoformat(), w1_end.isoformat(),
+            w2_start.isoformat(), w2_end.isoformat(),
+        )
+        w1_label = f"{w1_start.strftime('%d.%m')}–{w1_end.strftime('%d.%m')}"
+        w2_label = f"{w2_start.strftime('%d.%m')}–{w2_end.strftime('%d.%m')}"
+        lines = [f"↔️ <b>Сравнение недель</b>\n<i>эта ({w1_label}) vs прошлая ({w2_label})</i>\n"]
+        if not rows:
+            lines.append("😔 Нет данных.")
+        else:
+            for ctx_name, color, w1_m, w2_m in rows:
+                diff   = w1_m - w2_m
+                arrow  = "▲" if diff > 0 else ("▼" if diff < 0 else "=")
+                d_str  = f"{arrow} {fmt_dur(abs(diff))}" if diff != 0 else "= без изменений"
+                lines.append(
+                    f"{color} <b>{ctx_name}</b>\n"
+                    f"  {fmt_dur(w1_m)} vs {fmt_dur(w2_m)}  {d_str}\n"
+                )
+        try:
+            await callback.message.edit_text(
+                "\n".join(lines), parse_mode="HTML", reply_markup=stats_keyboard()
+            )
+        except Exception:
+            pass
+        await callback.answer()
+        return
+
     elif period in ("grid_week", "grid_month"):
         if period == "grid_week":
             start = today - timedelta(days=today.weekday())
@@ -898,6 +1012,10 @@ async def cb_stats(callback: CallbackQuery):
         text = f"{title}\n\n😔 Нет данных за этот период."
     else:
         text = _format_stats(activities, period, title)
+        if period == "day":
+            note = await get_day_note(callback.from_user.id, today.isoformat())
+            if note:
+                text += f"\n\n📝 <b>Заметка:</b>\n{note}"
         if len(text) > 4000:
             text = text[:3900] + "\n\n…(показано частично)"
 

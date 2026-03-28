@@ -32,9 +32,20 @@ async def init_db():
                 duration_minutes INTEGER NOT NULL,
                 activity_date    TEXT    NOT NULL,
                 hour_slot        INTEGER NOT NULL,
+                tags             TEXT    NOT NULL DEFAULT '',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id)    REFERENCES users(user_id),
                 FOREIGN KEY (context_id) REFERENCES contexts(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS day_notes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                note_date   TEXT    NOT NULL,
+                text        TEXT    NOT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, note_date),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
 
             CREATE TABLE IF NOT EXISTS notifications_sent (
@@ -55,15 +66,16 @@ async def init_db():
                 FOREIGN KEY (context_id) REFERENCES contexts(id)
             );
         """)
-        # Migration: add notification_hours column if missing
-        try:
-            await db.execute(
-                "ALTER TABLE users ADD COLUMN notification_hours TEXT NOT NULL "
-                "DEFAULT '10,11,12,13,14,15,16,17,18,19,20,21'"
-            )
-            await db.commit()
-        except Exception:
-            pass  # Column already exists
+        # Migrations for existing databases
+        for sql in [
+            "ALTER TABLE users ADD COLUMN notification_hours TEXT NOT NULL DEFAULT '10,11,12,13,14,15,16,17,18,19,20,21'",
+            "ALTER TABLE activities ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+        ]:
+            try:
+                await db.execute(sql)
+                await db.commit()
+            except Exception:
+                pass
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -244,15 +256,80 @@ async def add_activity(
     duration_minutes: int,
     activity_date: str,
     hour_slot: int,
-):
+) -> int:
+    """Returns the new activity ID."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        await db.execute(
+        cur = await db.execute(
             """INSERT INTO activities
                (user_id, context_id, description, duration_minutes, activity_date, hour_slot)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (user_id, context_id, description, duration_minutes, activity_date, hour_slot),
         )
         await db.commit()
+        return cur.lastrowid
+
+
+async def update_activity_tags(activity_id: int, user_id: int, tags: List[str]):
+    tags_str = ",".join(tags)
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE activities SET tags = ? WHERE id = ? AND user_id = ?",
+            (tags_str, activity_id, user_id),
+        )
+        await db.commit()
+
+
+# ── Day notes ─────────────────────────────────────────────────────────────────
+
+async def save_day_note(user_id: int, note_date: str, text: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """INSERT INTO day_notes (user_id, note_date, text) VALUES (?, ?, ?)
+               ON CONFLICT(user_id, note_date) DO UPDATE SET text = excluded.text""",
+            (user_id, note_date, text),
+        )
+        await db.commit()
+
+
+async def get_day_note(user_id: int, note_date: str) -> Optional[str]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT text FROM day_notes WHERE user_id = ? AND note_date = ?",
+            (user_id, note_date),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def delete_day_note(user_id: int, note_date: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM day_notes WHERE user_id = ? AND note_date = ?",
+            (user_id, note_date),
+        )
+        await db.commit()
+
+
+# ── Week comparison ───────────────────────────────────────────────────────────
+
+async def get_week_comparison(
+    user_id: int, w1_start: str, w1_end: str, w2_start: str, w2_end: str
+) -> List[Tuple]:
+    """Returns [(ctx_name, color, w1_minutes, w2_minutes), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT c.name, c.color,
+                  SUM(CASE WHEN a.activity_date BETWEEN ? AND ? THEN a.duration_minutes ELSE 0 END) as w1,
+                  SUM(CASE WHEN a.activity_date BETWEEN ? AND ? THEN a.duration_minutes ELSE 0 END) as w2
+               FROM contexts c
+               LEFT JOIN activities a ON a.context_id = c.id AND a.user_id = c.user_id
+               WHERE c.user_id = ?
+               GROUP BY c.id
+               HAVING w1 > 0 OR w2 > 0
+               ORDER BY (w1 + w2) DESC""",
+            (w1_start, w1_end, w2_start, w2_end, user_id),
+        )
+        return await cur.fetchall()
 
 
 async def get_recent_activities(user_id: int, limit: int = 10) -> List[Tuple]:
