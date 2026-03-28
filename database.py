@@ -170,6 +170,37 @@ async def get_activities_for_period(
 
 # ── Notifications dedup ───────────────────────────────────────────────────────
 
+async def get_all_users_stats() -> List[Tuple]:
+    """Returns [(user_id, username, timezone, reg_date, activity_count, last_activity), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT u.user_id, u.username, u.timezone, u.created_at,
+                      COUNT(a.id) as activity_count,
+                      MAX(a.created_at) as last_activity
+               FROM users u
+               LEFT JOIN activities a ON a.user_id = u.user_id
+               GROUP BY u.user_id
+               ORDER BY u.created_at DESC"""
+        )
+        return await cur.fetchall()
+
+
+async def get_user_full_stats(user_id: int) -> List[Tuple]:
+    """Returns recent activities for a specific user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT a.activity_date, a.hour_slot, c.name, c.color,
+                      a.description, a.duration_minutes
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ?
+               ORDER BY a.activity_date DESC, a.hour_slot DESC
+               LIMIT 50""",
+            (user_id,),
+        )
+        return await cur.fetchall()
+
+
 async def mark_notification_sent(user_id: int, date_str: str, hour_slot: int) -> bool:
     """Returns True if inserted (not a duplicate), False if already sent."""
     async with aiosqlite.connect(DATABASE_PATH) as db:

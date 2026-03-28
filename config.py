@@ -24,6 +24,8 @@ TIMEZONES = {
     "🇺🇸 Лос-Анджелес (UTC-8)": "America/Los_Angeles",
 }
 
+ADMIN_IDS = [43711483]
+
 CONTEXT_COLORS = [
     "🟥", "🟧", "🟨", "🟩", "🟦", "🟪",
     "🟫", "⬛", "🔴", "🔵", "🟤", "⚪",

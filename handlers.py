@@ -1,5 +1,6 @@
 import re
 import logging
+import functools
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
 
@@ -9,11 +10,11 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 
-from config import TIMEZONES, NOTIFY_HOURS_START, NOTIFY_HOURS_END
+from config import TIMEZONES, NOTIFY_HOURS_START, NOTIFY_HOURS_END, ADMIN_IDS
 from database import (
     register_user, user_exists, update_timezone, get_user,
     get_user_contexts, get_or_create_context, add_activity,
-    get_activities_for_period,
+    get_activities_for_period, get_all_users_stats, get_user_full_stats,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, contexts_keyboard,
@@ -401,6 +402,91 @@ def _format_stats(
 
 
 # ── Help ──────────────────────────────────────────────────────────────────────
+
+@router.message(Command("myid"))
+async def cmd_myid(message: Message):
+    await message.answer(f"Твой Telegram ID: `{message.from_user.id}`", parse_mode="Markdown")
+
+
+# ── Admin ─────────────────────────────────────────────────────────────────────
+
+def admin_only(func):
+    """Decorator: blocks non-admins."""
+    @functools.wraps(func)
+    async def wrapper(message: Message, **kwargs):
+        if message.from_user.id not in ADMIN_IDS:
+            await message.answer("⛔ Нет доступа.")
+            return
+        return await func(message, **kwargs)
+    return wrapper
+
+
+@router.message(Command("admin"))
+@admin_only
+async def cmd_admin(message: Message):
+    users = await get_all_users_stats()
+    if not users:
+        await message.answer("Пользователей нет.")
+        return
+
+    lines = ["<b>👥 Все пользователи</b>\n"]
+    for uid, username, tz, reg_date, act_count, last_act in users:
+        name = f"@{username}" if username else f"id{uid}"
+        reg = reg_date[:10] if reg_date else "—"
+        last = last_act[:10] if last_act else "никогда"
+        lines.append(
+            f"<b>{name}</b>  (id: <code>{uid}</code>)\n"
+            f"  🌍 {tz}\n"
+            f"  📅 Регистрация: {reg}\n"
+            f"  📝 Записей: {act_count}  |  Последняя: {last}\n"
+            f"  /user_{uid}\n"
+        )
+
+    lines.append(f"\n<b>Всего пользователей: {len(users)}</b>")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(F.text.regexp(r"^/user_\d+$"))
+@admin_only
+async def cmd_admin_user(message: Message):
+    try:
+        target_id = int(message.text.split("_")[1])
+    except (IndexError, ValueError):
+        await message.answer("Неверный формат. Используй /user_123456")
+        return
+
+    user = await get_user(target_id)
+    if not user:
+        await message.answer("Пользователь не найден.")
+        return
+
+    activities = await get_user_full_stats(target_id)
+    name = f"@{user[1]}" if user[1] else f"id{target_id}"
+
+    lines = [f"<b>📊 Активность: {name}</b>\n"]
+
+    if not activities:
+        lines.append("Нет записей.")
+    else:
+        # Group by date
+        days: dict = {}
+        for act_date, hour, ctx, color, desc, dur in activities:
+            days.setdefault(act_date, []).append((hour, ctx, color, desc, dur))
+
+        for day in sorted(days.keys(), reverse=True):
+            lines.append(f"<b>📅 {day}</b>")
+            for hour, ctx, color, desc, dur in sorted(days[day]):
+                lines.append(f"  {color} {ctx}  ·  {desc}  ·  {fmt_dur(dur)}")
+            lines.append("")
+
+        total_min = sum(a[5] for a in activities)
+        lines.append(f"<b>Всего за последние 50 записей: {fmt_dur(total_min)}</b>")
+
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:3900] + "\n\n…(показано частично)"
+    await message.answer(text, parse_mode="HTML")
+
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
