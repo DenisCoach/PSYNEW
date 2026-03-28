@@ -20,3 +20,7 @@ class EditFSM(StatesGroup):
 
 class ContextFSM(StatesGroup):
     waiting_new_name = State()
+
+
+class GoalFSM(StatesGroup):
+    waiting_hours = State()

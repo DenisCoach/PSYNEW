@@ -21,15 +21,18 @@ from database import (
     update_activity_description, update_activity_duration, update_activity_context,
     get_context_by_id, rename_context, update_context_color,
     count_context_activities, delete_context,
+    get_export_activities, set_goal, delete_goal, get_goals_with_progress,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, contexts_keyboard,
     after_activity_keyboard, stats_keyboard, schedule_keyboard,
     activities_list_keyboard, edit_menu_keyboard, delete_confirm_keyboard,
     contexts_list_keyboard, context_menu_keyboard, color_picker_keyboard,
-    ctx_delete_confirm_keyboard,
+    ctx_delete_confirm_keyboard, goals_contexts_keyboard, export_keyboard,
 )
-from states import Registration, ActivityFSM, EditFSM, ContextFSM
+import csv
+import io
+from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -615,6 +618,152 @@ async def cb_ctx_delete_ok(callback: CallbackQuery):
     await callback.answer()
 
 
+# ── Export ────────────────────────────────────────────────────────────────────
+
+@router.message(Command("export"))
+async def cmd_export(message: Message):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    await message.answer("📤 Выбери период для экспорта:", reply_markup=export_keyboard())
+
+
+@router.callback_query(F.data.startswith("exp:"))
+async def cb_export(callback: CallbackQuery):
+    period = callback.data.split(":")[1]
+    user   = await get_user(callback.from_user.id)
+    tz     = pytz.timezone(user[2])
+    today  = datetime.now(tz).date()
+
+    if period == "week":
+        start = today - timedelta(days=today.weekday())
+        end   = today
+        fname = f"export_week_{start}.csv"
+    elif period == "month":
+        start = today.replace(day=1)
+        end   = today
+        fname = f"export_{today.strftime('%Y-%m')}.csv"
+    else:
+        start = today.replace(year=2020, month=1, day=1)
+        end   = today
+        fname = f"export_all_{today}.csv"
+
+    activities = await get_export_activities(
+        callback.from_user.id, start.isoformat(), end.isoformat()
+    )
+
+    if not activities:
+        await callback.answer("Нет данных за этот период", show_alert=True)
+        return
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Дата", "Час", "Контекст", "Описание", "Минут"])
+    for act_date, hour, ctx, desc, dur in activities:
+        writer.writerow([act_date, f"{hour:02d}:00", ctx, desc, dur])
+
+    csv_bytes = BufferedInputFile(buf.getvalue().encode("utf-8-sig"), filename=fname)
+    await callback.message.answer_document(
+        document=csv_bytes,
+        caption=f"📤 Экспорт: {fname}\n{len(activities)} записей",
+    )
+    await callback.answer()
+
+
+# ── Goals ──────────────────────────────────────────────────────────────────────
+
+@router.message(Command("goals"))
+async def cmd_goals(message: Message, state: FSMContext):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    await state.clear()
+    await _show_goals(message.from_user.id, message)
+
+
+async def _show_goals(user_id: int, target):
+    """target can be Message or CallbackQuery.message"""
+    tz      = pytz.timezone((await get_user(user_id))[2])
+    today   = datetime.now(tz).date()
+    w_start = today - timedelta(days=today.weekday())
+    w_end   = today
+
+    progress = await get_goals_with_progress(user_id, w_start.isoformat(), w_end.isoformat())
+    contexts = await get_user_contexts(user_id)
+
+    goals_dict = {row[3]: row[2] for row in progress}  # {ctx_id: weekly_hours}
+
+    lines = [f"🎯 <b>Цели на неделю</b>  ({w_start.strftime('%d.%m')}–{w_end.strftime('%d.%m')})\n"]
+
+    if progress:
+        for ctx_name, color, target_h, ctx_id, actual_m in progress:
+            actual_h  = actual_m / 60
+            pct       = min(int(actual_h / target_h * 100), 100) if target_h else 0
+            filled    = pct // 10
+            bar       = "█" * filled + "░" * (10 - filled)
+            lines.append(
+                f"{color} <b>{ctx_name}</b>\n"
+                f"  {bar} {fmt_dur(actual_m)} / {target_h:.0f}ч  ({pct}%)\n"
+            )
+    else:
+        lines.append("Целей пока нет.\n")
+
+    lines.append("Нажми на контекст чтобы установить цель:")
+
+    text = "\n".join(lines)
+    kb   = goals_contexts_keyboard(contexts, goals_dict)
+
+    if hasattr(target, "edit_text"):
+        await target.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("gl:"))
+async def cb_goal_select(callback: CallbackQuery, state: FSMContext):
+    ctx_id = int(callback.data.split(":")[1])
+    ctx    = await get_context_by_id(ctx_id, callback.from_user.id)
+    if not ctx:
+        await callback.answer("Контекст не найден", show_alert=True)
+        return
+    await state.set_state(GoalFSM.waiting_hours)
+    await state.update_data(ctx_id=ctx_id)
+    await callback.message.answer(
+        f"🎯 Цель для {ctx[2]} <b>{ctx[1]}</b>\n\n"
+        "Сколько часов в неделю хочешь тратить?\n"
+        "Введи число (например <code>10</code> или <code>2.5</code>)\n"
+        "Введи <code>0</code> чтобы удалить цель.",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(GoalFSM.waiting_hours)
+async def fsm_goal_hours(message: Message, state: FSMContext):
+    try:
+        hours = float(message.text.strip().replace(",", "."))
+    except ValueError:
+        await message.answer("❌ Введи число, например <code>10</code> или <code>2.5</code>", parse_mode="HTML")
+        return
+
+    if hours < 0 or hours > 168:
+        await message.answer("❌ Некорректное значение.")
+        return
+
+    data = await state.get_data()
+    await state.clear()
+
+    if hours == 0:
+        await delete_goal(message.from_user.id, data["ctx_id"])
+        await message.answer("✅ Цель удалена.")
+    else:
+        await set_goal(message.from_user.id, data["ctx_id"], hours)
+        ctx = await get_context_by_id(data["ctx_id"], message.from_user.id)
+        await message.answer(f"✅ Цель установлена: {ctx[2]} <b>{ctx[1]}</b> — {hours:.0f}ч/нед", parse_mode="HTML")
+
+    await _show_goals(message.from_user.id, message)
+
+
 # ── /cancel ───────────────────────────────────────────────────────────────────
 
 @router.message(Command("cancel"))
@@ -870,6 +1019,8 @@ async def cmd_help(message: Message):
         "/add — добавить дело вручную\n"
         "/edit — редактировать или удалить запись\n"
         "/contexts — управление контекстами\n"
+        "/goals — цели по контекстам на неделю\n"
+        "/export — выгрузить данные в CSV\n"
         "/stats — просмотр статистики\n"
         "/schedule — настройка расписания уведомлений\n"
         "/timezone — сменить часовой пояс\n"

@@ -43,6 +43,17 @@ async def init_db():
                 hour_slot         INTEGER NOT NULL,
                 PRIMARY KEY (user_id, notification_date, hour_slot)
             );
+
+            CREATE TABLE IF NOT EXISTS goals (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                context_id  INTEGER NOT NULL,
+                weekly_hours REAL    NOT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, context_id),
+                FOREIGN KEY (user_id)   REFERENCES users(user_id),
+                FOREIGN KEY (context_id) REFERENCES contexts(id)
+            );
         """)
         # Migration: add notification_hours column if missing
         try:
@@ -355,6 +366,63 @@ async def get_user_full_stats(user_id: int) -> List[Tuple]:
                ORDER BY a.activity_date DESC, a.hour_slot DESC
                LIMIT 50""",
             (user_id,),
+        )
+        return await cur.fetchall()
+
+
+async def get_export_activities(user_id: int, start_date: str, end_date: str) -> List[Tuple]:
+    """Returns all activities for CSV export."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT a.activity_date, a.hour_slot, c.name,
+                      a.description, a.duration_minutes
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ? AND a.activity_date BETWEEN ? AND ?
+               ORDER BY a.activity_date, a.hour_slot, a.created_at""",
+            (user_id, start_date, end_date),
+        )
+        return await cur.fetchall()
+
+
+# ── Goals ─────────────────────────────────────────────────────────────────────
+
+async def set_goal(user_id: int, context_id: int, weekly_hours: float):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """INSERT INTO goals (user_id, context_id, weekly_hours)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id, context_id)
+               DO UPDATE SET weekly_hours = excluded.weekly_hours""",
+            (user_id, context_id, weekly_hours),
+        )
+        await db.commit()
+
+
+async def delete_goal(user_id: int, context_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM goals WHERE user_id = ? AND context_id = ?",
+            (user_id, context_id),
+        )
+        await db.commit()
+
+
+async def get_goals_with_progress(user_id: int, week_start: str, week_end: str) -> List[Tuple]:
+    """Returns [(ctx_name, color, weekly_hours_target, actual_minutes), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT c.name, c.color, g.weekly_hours, g.context_id,
+                      COALESCE(SUM(a.duration_minutes), 0) as actual_minutes
+               FROM goals g
+               JOIN contexts c ON g.context_id = c.id
+               LEFT JOIN activities a ON a.context_id = g.context_id
+                   AND a.user_id = g.user_id
+                   AND a.activity_date BETWEEN ? AND ?
+               WHERE g.user_id = ?
+               GROUP BY g.context_id
+               ORDER BY g.weekly_hours DESC""",
+            (week_start, week_end, user_id),
         )
         return await cur.fetchall()
 

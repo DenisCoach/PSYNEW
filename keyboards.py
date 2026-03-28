@@ -82,6 +82,26 @@ def ctx_delete_confirm_keyboard(ctx_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def goals_contexts_keyboard(contexts: List[Tuple], goals: dict) -> InlineKeyboardMarkup:
+    """contexts: [(id, name, color)], goals: {context_id: weekly_hours}"""
+    builder = InlineKeyboardBuilder()
+    for ctx_id, name, color in contexts:
+        target = goals.get(ctx_id)
+        suffix = f" → {target}ч/нед" if target else ""
+        builder.button(text=f"{color} {name}{suffix}", callback_data=f"gl:{ctx_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def export_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📅 Неделя",  callback_data="exp:week")
+    builder.button(text="📆 Месяц",   callback_data="exp:month")
+    builder.button(text="📊 Всё время", callback_data="exp:all")
+    builder.adjust(3)
+    return builder.as_markup()
+
+
 def activities_list_keyboard(activities: List[Tuple]) -> InlineKeyboardMarkup:
     """List of recent activities as buttons. Each tuple: (id, date, hour, ctx, color, desc, dur)"""
     builder = InlineKeyboardBuilder()
