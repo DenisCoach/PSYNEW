@@ -1,0 +1,185 @@
+import aiosqlite
+from typing import Optional, List, Tuple
+from config import DATABASE_PATH, CONTEXT_COLORS
+
+
+async def init_db():
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id   INTEGER PRIMARY KEY,
+                username  TEXT,
+                timezone  TEXT NOT NULL DEFAULT 'Europe/Moscow',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS contexts (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                name       TEXT    NOT NULL,
+                color      TEXT    NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, name),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS activities (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id          INTEGER NOT NULL,
+                context_id       INTEGER NOT NULL,
+                description      TEXT    NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                activity_date    TEXT    NOT NULL,
+                hour_slot        INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id)    REFERENCES users(user_id),
+                FOREIGN KEY (context_id) REFERENCES contexts(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS notifications_sent (
+                user_id           INTEGER NOT NULL,
+                notification_date TEXT    NOT NULL,
+                hour_slot         INTEGER NOT NULL,
+                PRIMARY KEY (user_id, notification_date, hour_slot)
+            );
+        """)
+        await db.commit()
+
+
+# ── Users ─────────────────────────────────────────────────────────────────────
+
+async def user_exists(user_id: int) -> bool:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+        return await cur.fetchone() is not None
+
+
+async def register_user(user_id: int, username: str, timezone: str) -> bool:
+    """Returns True if newly registered, False if already exists."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,))
+        if await cur.fetchone():
+            return False
+        await db.execute(
+            "INSERT INTO users (user_id, username, timezone) VALUES (?, ?, ?)",
+            (user_id, username or "", timezone),
+        )
+        await db.commit()
+        return True
+
+
+async def update_timezone(user_id: int, timezone: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE users SET timezone = ? WHERE user_id = ?", (timezone, user_id)
+        )
+        await db.commit()
+
+
+async def get_user(user_id: int) -> Optional[Tuple]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT user_id, username, timezone FROM users WHERE user_id = ?", (user_id,)
+        )
+        return await cur.fetchone()
+
+
+async def get_all_users() -> List[Tuple]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute("SELECT user_id, timezone FROM users")
+        return await cur.fetchall()
+
+
+# ── Contexts ──────────────────────────────────────────────────────────────────
+
+async def get_user_contexts(user_id: int) -> List[Tuple]:
+    """Returns [(id, name, color), ...] ordered by most recently used."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT c.id, c.name, c.color
+               FROM contexts c
+               LEFT JOIN activities a ON a.context_id = c.id
+               WHERE c.user_id = ?
+               GROUP BY c.id
+               ORDER BY MAX(a.created_at) DESC, c.created_at DESC""",
+            (user_id,),
+        )
+        return await cur.fetchall()
+
+
+async def get_or_create_context(user_id: int, name: str) -> Tuple[int, str]:
+    """Returns (context_id, color)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, color FROM contexts WHERE user_id = ? AND LOWER(name) = LOWER(?)",
+            (user_id, name.strip()),
+        )
+        existing = await cur.fetchone()
+        if existing:
+            return existing[0], existing[1]
+
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM contexts WHERE user_id = ?", (user_id,)
+        )
+        count = (await cur.fetchone())[0]
+        color = CONTEXT_COLORS[count % len(CONTEXT_COLORS)]
+
+        cur = await db.execute(
+            "INSERT INTO contexts (user_id, name, color) VALUES (?, ?, ?)",
+            (user_id, name.strip(), color),
+        )
+        await db.commit()
+        return cur.lastrowid, color
+
+
+# ── Activities ────────────────────────────────────────────────────────────────
+
+async def add_activity(
+    user_id: int,
+    context_id: int,
+    description: str,
+    duration_minutes: int,
+    activity_date: str,
+    hour_slot: int,
+):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """INSERT INTO activities
+               (user_id, context_id, description, duration_minutes, activity_date, hour_slot)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, context_id, description, duration_minutes, activity_date, hour_slot),
+        )
+        await db.commit()
+
+
+async def get_activities_for_period(
+    user_id: int, start_date: str, end_date: str
+) -> List[Tuple]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT a.activity_date, a.hour_slot, c.name, c.color,
+                      a.description, a.duration_minutes
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ? AND a.activity_date BETWEEN ? AND ?
+               ORDER BY a.activity_date, a.hour_slot, a.created_at""",
+            (user_id, start_date, end_date),
+        )
+        return await cur.fetchall()
+
+
+# ── Notifications dedup ───────────────────────────────────────────────────────
+
+async def mark_notification_sent(user_id: int, date_str: str, hour_slot: int) -> bool:
+    """Returns True if inserted (not a duplicate), False if already sent."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        try:
+            await db.execute(
+                "INSERT INTO notifications_sent (user_id, notification_date, hour_slot) "
+                "VALUES (?, ?, ?)",
+                (user_id, date_str, hour_slot),
+            )
+            await db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
