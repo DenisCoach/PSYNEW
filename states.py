@@ -16,3 +16,7 @@ class EditFSM(StatesGroup):
     waiting_new_description = State()
     waiting_new_duration = State()
     choosing_new_context = State()
+
+
+class ContextFSM(StatesGroup):
+    waiting_new_name = State()

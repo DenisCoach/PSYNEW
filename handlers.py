@@ -19,13 +19,17 @@ from database import (
     get_notification_hours, toggle_notification_hour,
     get_recent_activities, get_activity_by_id, delete_activity,
     update_activity_description, update_activity_duration, update_activity_context,
+    get_context_by_id, rename_context, update_context_color,
+    count_context_activities, delete_context,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, contexts_keyboard,
     after_activity_keyboard, stats_keyboard, schedule_keyboard,
     activities_list_keyboard, edit_menu_keyboard, delete_confirm_keyboard,
+    contexts_list_keyboard, context_menu_keyboard, color_picker_keyboard,
+    ctx_delete_confirm_keyboard,
 )
-from states import Registration, ActivityFSM, EditFSM
+from states import Registration, ActivityFSM, EditFSM, ContextFSM
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -477,6 +481,140 @@ async def cb_delete_ok(callback: CallbackQuery):
     await callback.answer()
 
 
+# ── Context management ────────────────────────────────────────────────────────
+
+@router.message(Command("contexts"))
+async def cmd_contexts(message: Message, state: FSMContext):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    await state.clear()
+    contexts = await get_user_contexts(message.from_user.id)
+    if not contexts:
+        await message.answer("У тебя пока нет контекстов.")
+        return
+    await message.answer(
+        "🏷 <b>Твои контексты:</b>",
+        parse_mode="HTML",
+        reply_markup=contexts_list_keyboard(contexts),
+    )
+
+
+@router.callback_query(F.data.startswith("cm:"))
+async def cb_ctx_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    ctx_id = int(callback.data.split(":")[1])
+    ctx = await get_context_by_id(ctx_id, callback.from_user.id)
+    if not ctx:
+        await callback.answer("Контекст не найден", show_alert=True)
+        return
+    count = await count_context_activities(ctx_id, callback.from_user.id)
+    await callback.message.edit_text(
+        f"{ctx[2]} <b>{ctx[1]}</b>\n📝 Записей: {count}",
+        parse_mode="HTML",
+        reply_markup=context_menu_keyboard(ctx_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cm_back")
+async def cb_ctx_back(callback: CallbackQuery):
+    contexts = await get_user_contexts(callback.from_user.id)
+    await callback.message.edit_text(
+        "🏷 <b>Твои контексты:</b>",
+        parse_mode="HTML",
+        reply_markup=contexts_list_keyboard(contexts),
+    )
+    await callback.answer()
+
+
+# — Rename —
+
+@router.callback_query(F.data.startswith("cm_ren:"))
+async def cb_ctx_rename_start(callback: CallbackQuery, state: FSMContext):
+    ctx_id = int(callback.data.split(":")[1])
+    await state.set_state(ContextFSM.waiting_new_name)
+    await state.update_data(ctx_id=ctx_id)
+    await callback.message.answer("✏️ Введи новое название контекста:")
+    await callback.answer()
+
+
+@router.message(ContextFSM.waiting_new_name)
+async def fsm_ctx_rename(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if len(name) > 30:
+        await message.answer("❌ Максимум 30 символов.")
+        return
+    data = await state.get_data()
+    await rename_context(data["ctx_id"], message.from_user.id, name)
+    await state.clear()
+    ctx = await get_context_by_id(data["ctx_id"], message.from_user.id)
+    await message.answer(
+        f"✅ Переименовано: {ctx[2]} <b>{ctx[1]}</b>",
+        parse_mode="HTML",
+        reply_markup=context_menu_keyboard(data["ctx_id"]),
+    )
+
+
+# — Color —
+
+@router.callback_query(F.data.startswith("cm_col:"))
+async def cb_ctx_color(callback: CallbackQuery):
+    ctx_id = int(callback.data.split(":")[1])
+    await callback.message.edit_text(
+        "🎨 Выбери цвет:",
+        reply_markup=color_picker_keyboard(ctx_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cm_setcol:"))
+async def cb_ctx_set_color(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    ctx_id = int(parts[1])
+    color  = parts[2]
+    await update_context_color(ctx_id, callback.from_user.id, color)
+    ctx = await get_context_by_id(ctx_id, callback.from_user.id)
+    await callback.message.edit_text(
+        f"✅ Цвет обновлён: {ctx[2]} <b>{ctx[1]}</b>",
+        parse_mode="HTML",
+        reply_markup=context_menu_keyboard(ctx_id),
+    )
+    await callback.answer()
+
+
+# — Delete —
+
+@router.callback_query(F.data.startswith("cm_del:"))
+async def cb_ctx_delete_confirm(callback: CallbackQuery):
+    ctx_id = int(callback.data.split(":")[1])
+    ctx    = await get_context_by_id(ctx_id, callback.from_user.id)
+    count  = await count_context_activities(ctx_id, callback.from_user.id)
+    await callback.message.edit_text(
+        f"🗑 Удалить {ctx[2]} <b>{ctx[1]}</b>?\n\n"
+        f"⚠️ Вместе с ним удалится <b>{count} записей</b>.",
+        parse_mode="HTML",
+        reply_markup=ctx_delete_confirm_keyboard(ctx_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cm_del_ok:"))
+async def cb_ctx_delete_ok(callback: CallbackQuery):
+    ctx_id = int(callback.data.split(":")[1])
+    await delete_context(ctx_id, callback.from_user.id)
+    contexts = await get_user_contexts(callback.from_user.id)
+    if contexts:
+        await callback.message.edit_text(
+            "✅ Контекст удалён.\n\n🏷 <b>Твои контексты:</b>",
+            parse_mode="HTML",
+            reply_markup=contexts_list_keyboard(contexts),
+        )
+    else:
+        await callback.message.edit_text("✅ Контекст удалён. Контекстов больше нет.")
+    await callback.answer()
+
+
 # ── /cancel ───────────────────────────────────────────────────────────────────
 
 @router.message(Command("cancel"))
@@ -731,6 +869,7 @@ async def cmd_help(message: Message):
         "/start — регистрация\n"
         "/add — добавить дело вручную\n"
         "/edit — редактировать или удалить запись\n"
+        "/contexts — управление контекстами\n"
         "/stats — просмотр статистики\n"
         "/schedule — настройка расписания уведомлений\n"
         "/timezone — сменить часовой пояс\n"

@@ -44,6 +44,44 @@ def after_activity_keyboard(date_str: str, hour: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+COLORS = ["🟥","🟧","🟨","🟩","🟦","🟪","🟫","⬛","🔴","🔵","🟤","⚪"]
+
+
+def contexts_list_keyboard(contexts: List[Tuple]) -> InlineKeyboardMarkup:
+    """List of user's contexts. Each tuple: (id, name, color)"""
+    builder = InlineKeyboardBuilder()
+    for ctx_id, name, color in contexts:
+        builder.button(text=f"{color} {name}", callback_data=f"cm:{ctx_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def context_menu_keyboard(ctx_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Переименовать", callback_data=f"cm_ren:{ctx_id}")
+    builder.button(text="🎨 Цвет",          callback_data=f"cm_col:{ctx_id}")
+    builder.button(text="🗑 Удалить",       callback_data=f"cm_del:{ctx_id}")
+    builder.button(text="◀️ Назад",         callback_data="cm_back")
+    builder.adjust(2, 1, 1)
+    return builder.as_markup()
+
+
+def color_picker_keyboard(ctx_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for color in COLORS:
+        builder.button(text=color, callback_data=f"cm_setcol:{ctx_id}:{color}")
+    builder.adjust(4)
+    return builder.as_markup()
+
+
+def ctx_delete_confirm_keyboard(ctx_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить", callback_data=f"cm_del_ok:{ctx_id}")
+    builder.button(text="❌ Отмена",      callback_data=f"cm:{ctx_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 def activities_list_keyboard(activities: List[Tuple]) -> InlineKeyboardMarkup:
     """List of recent activities as buttons. Each tuple: (id, date, hour, ctx, color, desc, dur)"""
     builder = InlineKeyboardBuilder()

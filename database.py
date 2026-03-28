@@ -149,6 +149,56 @@ async def get_user_contexts(user_id: int) -> List[Tuple]:
         return await cur.fetchall()
 
 
+async def get_context_by_id(ctx_id: int, user_id: int) -> Optional[Tuple]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, name, color FROM contexts WHERE id = ? AND user_id = ?",
+            (ctx_id, user_id),
+        )
+        return await cur.fetchone()
+
+
+async def rename_context(ctx_id: int, user_id: int, new_name: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE contexts SET name = ? WHERE id = ? AND user_id = ?",
+            (new_name.strip(), ctx_id, user_id),
+        )
+        await db.commit()
+
+
+async def update_context_color(ctx_id: int, user_id: int, color: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE contexts SET color = ? WHERE id = ? AND user_id = ?",
+            (color, ctx_id, user_id),
+        )
+        await db.commit()
+
+
+async def count_context_activities(ctx_id: int, user_id: int) -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM activities WHERE context_id = ? AND user_id = ?",
+            (ctx_id, user_id),
+        )
+        return (await cur.fetchone())[0]
+
+
+async def delete_context(ctx_id: int, user_id: int):
+    """Deletes context and all its activities."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM activities WHERE context_id = ? AND user_id = ?",
+            (ctx_id, user_id),
+        )
+        await db.execute(
+            "DELETE FROM contexts WHERE id = ? AND user_id = ?",
+            (ctx_id, user_id),
+        )
+        await db.commit()
+
+
 async def get_or_create_context(user_id: int, name: str) -> Tuple[int, str]:
     """Returns (context_id, color)."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -305,6 +355,31 @@ async def get_user_full_stats(user_id: int) -> List[Tuple]:
                ORDER BY a.activity_date DESC, a.hour_slot DESC
                LIMIT 50""",
             (user_id,),
+        )
+        return await cur.fetchall()
+
+
+async def get_recorded_hours_today(user_id: int, activity_date: str) -> set:
+    """Returns set of hour_slots that have at least one activity today."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT DISTINCT hour_slot FROM activities WHERE user_id = ? AND activity_date = ?",
+            (user_id, activity_date),
+        )
+        return {row[0] for row in await cur.fetchall()}
+
+
+async def get_day_summary(user_id: int, activity_date: str) -> List[Tuple]:
+    """Returns [(ctx_name, color, total_minutes), ...] for the day."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT c.name, c.color, SUM(a.duration_minutes) as total
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ? AND a.activity_date = ?
+               GROUP BY c.id
+               ORDER BY total DESC""",
+            (user_id, activity_date),
         )
         return await cur.fetchall()
 
