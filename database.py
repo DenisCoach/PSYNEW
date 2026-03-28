@@ -194,6 +194,72 @@ async def add_activity(
         await db.commit()
 
 
+async def get_recent_activities(user_id: int, limit: int = 10) -> List[Tuple]:
+    """Returns [(id, activity_date, hour_slot, ctx_name, color, description, duration), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT a.id, a.activity_date, a.hour_slot, c.name, c.color,
+                      a.description, a.duration_minutes
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ?
+               ORDER BY a.activity_date DESC, a.hour_slot DESC, a.created_at DESC
+               LIMIT ?""",
+            (user_id, limit),
+        )
+        return await cur.fetchall()
+
+
+async def get_activity_by_id(activity_id: int, user_id: int) -> Optional[Tuple]:
+    """Returns (id, activity_date, hour_slot, ctx_name, color, description, duration)"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT a.id, a.activity_date, a.hour_slot, c.name, c.color,
+                      a.description, a.duration_minutes
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.id = ? AND a.user_id = ?""",
+            (activity_id, user_id),
+        )
+        return await cur.fetchone()
+
+
+async def delete_activity(activity_id: int, user_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM activities WHERE id = ? AND user_id = ?",
+            (activity_id, user_id),
+        )
+        await db.commit()
+
+
+async def update_activity_description(activity_id: int, user_id: int, description: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE activities SET description = ? WHERE id = ? AND user_id = ?",
+            (description, activity_id, user_id),
+        )
+        await db.commit()
+
+
+async def update_activity_duration(activity_id: int, user_id: int, duration: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE activities SET duration_minutes = ? WHERE id = ? AND user_id = ?",
+            (duration, activity_id, user_id),
+        )
+        await db.commit()
+
+
+async def update_activity_context(activity_id: int, user_id: int, context_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE activities SET context_id = ? WHERE id = ? AND user_id = ?",
+            (context_id, activity_id, user_id),
+        )
+        await db.commit()
+
+
 async def get_activities_for_period(
     user_id: int, start_date: str, end_date: str
 ) -> List[Tuple]:

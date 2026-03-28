@@ -10,3 +10,9 @@ class ActivityFSM(StatesGroup):
     waiting_duration = State()
     choosing_context = State()
     entering_new_context = State()
+
+
+class EditFSM(StatesGroup):
+    waiting_new_description = State()
+    waiting_new_duration = State()
+    choosing_new_context = State()

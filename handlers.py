@@ -6,22 +6,26 @@ from typing import Optional, List, Tuple
 
 import pytz
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 
 from config import TIMEZONES, NOTIFY_HOURS_START, NOTIFY_HOURS_END, ADMIN_IDS
+from visualizer import generate_grid
 from database import (
     register_user, user_exists, update_timezone, get_user,
     get_user_contexts, get_or_create_context, add_activity,
     get_activities_for_period, get_all_users_stats, get_user_full_stats,
     get_notification_hours, toggle_notification_hour,
+    get_recent_activities, get_activity_by_id, delete_activity,
+    update_activity_description, update_activity_duration, update_activity_context,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, contexts_keyboard,
     after_activity_keyboard, stats_keyboard, schedule_keyboard,
+    activities_list_keyboard, edit_menu_keyboard, delete_confirm_keyboard,
 )
-from states import Registration, ActivityFSM
+from states import Registration, ActivityFSM, EditFSM
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -293,6 +297,186 @@ async def fsm_new_context_name(message: Message, state: FSMContext):
     )
 
 
+# ── Edit / Delete ─────────────────────────────────────────────────────────────
+
+async def _activity_text(act: Tuple) -> str:
+    act_id, act_date, hour, ctx, color, desc, dur = act
+    return (
+        f"{color} <b>{ctx}</b>\n"
+        f"📅 {act_date}  🕐 {hour:02d}:00–{hour+1:02d}:00\n"
+        f"📝 {desc}\n"
+        f"⏱ {fmt_dur(dur)}"
+    )
+
+
+@router.message(Command("edit"))
+async def cmd_edit(message: Message, state: FSMContext):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    await state.clear()
+    activities = await get_recent_activities(message.from_user.id, limit=10)
+    if not activities:
+        await message.answer("Нет записей для редактирования.")
+        return
+    await message.answer(
+        "✏️ <b>Выбери запись:</b>",
+        parse_mode="HTML",
+        reply_markup=activities_list_keyboard(activities),
+    )
+
+
+@router.callback_query(F.data.startswith("ea:"))
+async def cb_edit_select(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    act_id = int(callback.data.split(":")[1])
+    act = await get_activity_by_id(act_id, callback.from_user.id)
+    if not act:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+    text = await _activity_text(act)
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=edit_menu_keyboard(act_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "edit_back")
+async def cb_edit_back(callback: CallbackQuery):
+    activities = await get_recent_activities(callback.from_user.id, limit=10)
+    await callback.message.edit_text(
+        "✏️ <b>Выбери запись:</b>",
+        parse_mode="HTML",
+        reply_markup=activities_list_keyboard(activities),
+    )
+    await callback.answer()
+
+
+# — Edit description —
+
+@router.callback_query(F.data.startswith("ed:"))
+async def cb_edit_desc_start(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    await state.set_state(EditFSM.waiting_new_description)
+    await state.update_data(act_id=act_id)
+    await callback.message.answer("✏️ Введи новое описание:")
+    await callback.answer()
+
+
+@router.message(EditFSM.waiting_new_description)
+async def fsm_edit_desc(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await update_activity_description(data["act_id"], message.from_user.id, message.text.strip())
+    await state.clear()
+    act = await get_activity_by_id(data["act_id"], message.from_user.id)
+    text = await _activity_text(act)
+    await message.answer(
+        f"✅ Описание обновлено!\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=edit_menu_keyboard(data["act_id"]),
+    )
+
+
+# — Edit duration —
+
+@router.callback_query(F.data.startswith("et:"))
+async def cb_edit_dur_start(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    await state.set_state(EditFSM.waiting_new_duration)
+    await state.update_data(act_id=act_id)
+    await callback.message.answer(
+        "⏱ Введи новую длительность:\n"
+        "<code>30</code>  <code>1ч</code>  <code>1ч 30мин</code>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(EditFSM.waiting_new_duration)
+async def fsm_edit_dur(message: Message, state: FSMContext):
+    minutes = parse_duration(message.text)
+    if not minutes or minutes > 600:
+        await message.answer("❌ Не понял. Например: <code>45</code> или <code>1ч 30мин</code>", parse_mode="HTML")
+        return
+    data = await state.get_data()
+    await update_activity_duration(data["act_id"], message.from_user.id, minutes)
+    await state.clear()
+    act = await get_activity_by_id(data["act_id"], message.from_user.id)
+    text = await _activity_text(act)
+    await message.answer(
+        f"✅ Время обновлено!\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=edit_menu_keyboard(data["act_id"]),
+    )
+
+
+# — Edit context —
+
+@router.callback_query(F.data.startswith("ec:"))
+async def cb_edit_ctx_start(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    await state.set_state(EditFSM.choosing_new_context)
+    await state.update_data(act_id=act_id)
+    contexts = await get_user_contexts(callback.from_user.id)
+    await callback.message.answer(
+        "🔄 Выбери новый контекст:",
+        reply_markup=contexts_keyboard(contexts, "edit", act_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ctx:"), EditFSM.choosing_new_context)
+async def fsm_edit_ctx(callback: CallbackQuery, state: FSMContext):
+    parts = callback.data.split(":")
+    ctx_id = int(parts[1])
+    data = await state.get_data()
+    await update_activity_context(data["act_id"], callback.from_user.id, ctx_id)
+    await state.clear()
+    act = await get_activity_by_id(data["act_id"], callback.from_user.id)
+    text = await _activity_text(act)
+    await callback.message.edit_text(
+        f"✅ Контекст обновлён!\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=edit_menu_keyboard(data["act_id"]),
+    )
+    await callback.answer()
+
+
+# — Delete —
+
+@router.callback_query(F.data.startswith("edel:"))
+async def cb_delete_confirm(callback: CallbackQuery):
+    act_id = int(callback.data.split(":")[1])
+    act = await get_activity_by_id(act_id, callback.from_user.id)
+    if not act:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+    text = await _activity_text(act)
+    await callback.message.edit_text(
+        f"🗑 <b>Удалить эту запись?</b>\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=delete_confirm_keyboard(act_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("edel_ok:"))
+async def cb_delete_ok(callback: CallbackQuery):
+    act_id = int(callback.data.split(":")[1])
+    await delete_activity(act_id, callback.from_user.id)
+    activities = await get_recent_activities(callback.from_user.id, limit=10)
+    if activities:
+        await callback.message.edit_text(
+            "✅ Удалено.\n\n✏️ <b>Выбери запись:</b>",
+            parse_mode="HTML",
+            reply_markup=activities_list_keyboard(activities),
+        )
+    else:
+        await callback.message.edit_text("✅ Удалено. Записей больше нет.")
+    await callback.answer()
+
+
 # ── /cancel ───────────────────────────────────────────────────────────────────
 
 @router.message(Command("cancel"))
@@ -325,10 +509,33 @@ async def cb_stats(callback: CallbackQuery):
         start = today - timedelta(days=today.weekday())
         end = today
         title = f"📆 Неделя ({start.strftime('%d.%m')}–{end.strftime('%d.%m.%Y')})"
-    else:
+    elif period == "month":
         start = today.replace(day=1)
         end = today
         title = today.strftime("📊 %B %Y")
+    elif period in ("grid_week", "grid_month"):
+        if period == "grid_week":
+            start = today - timedelta(days=today.weekday())
+            end = today
+            title = f"Неделя {start.strftime('%d.%m')}–{end.strftime('%d.%m.%Y')}"
+        else:
+            start = today.replace(day=1)
+            end = today
+            title = today.strftime("%B %Y")
+
+        await callback.answer("⏳ Генерирую...")
+        activities = await get_activities_for_period(
+            callback.from_user.id, start.isoformat(), end.isoformat()
+        )
+        if not activities:
+            await callback.message.answer("😔 Нет данных за этот период.")
+        else:
+            image = await generate_grid(callback.from_user.id, start, end, title)
+            doc = BufferedInputFile(image.read(), filename="grid.png")
+            await callback.message.answer_document(document=doc, caption=f"🗓 {title}")
+        return
+    else:
+        return
 
     activities = await get_activities_for_period(
         callback.from_user.id, start.isoformat(), end.isoformat()
@@ -523,6 +730,7 @@ async def cmd_help(message: Message):
         "<b>Команды:</b>\n\n"
         "/start — регистрация\n"
         "/add — добавить дело вручную\n"
+        "/edit — редактировать или удалить запись\n"
         "/stats — просмотр статистики\n"
         "/schedule — настройка расписания уведомлений\n"
         "/timezone — сменить часовой пояс\n"

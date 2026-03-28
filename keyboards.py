@@ -44,6 +44,36 @@ def after_activity_keyboard(date_str: str, hour: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def activities_list_keyboard(activities: List[Tuple]) -> InlineKeyboardMarkup:
+    """List of recent activities as buttons. Each tuple: (id, date, hour, ctx, color, desc, dur)"""
+    builder = InlineKeyboardBuilder()
+    for act_id, act_date, hour, ctx, color, desc, dur in activities:
+        short_desc = desc[:18] + "…" if len(desc) > 18 else desc
+        label = f"{color} {short_desc} · {act_date[5:]} {hour:02d}:00"
+        builder.button(text=label, callback_data=f"ea:{act_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def edit_menu_keyboard(act_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Описание",   callback_data=f"ed:{act_id}")
+    builder.button(text="⏱ Время",       callback_data=f"et:{act_id}")
+    builder.button(text="🔄 Контекст",   callback_data=f"ec:{act_id}")
+    builder.button(text="🗑 Удалить",    callback_data=f"edel:{act_id}")
+    builder.button(text="◀️ Назад",      callback_data="edit_back")
+    builder.adjust(2, 2, 1)
+    return builder.as_markup()
+
+
+def delete_confirm_keyboard(act_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, удалить", callback_data=f"edel_ok:{act_id}")
+    builder.button(text="❌ Отмена",      callback_data=f"ea:{act_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 def schedule_keyboard(active_hours: List[int]) -> InlineKeyboardMarkup:
     """Grid of all 24 hours. Active = ✅, inactive = ☐"""
     builder = InlineKeyboardBuilder()
@@ -56,8 +86,10 @@ def schedule_keyboard(active_hours: List[int]) -> InlineKeyboardMarkup:
 
 def stats_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="📅 День",    callback_data="stats:day")
-    builder.button(text="📆 Неделя", callback_data="stats:week")
-    builder.button(text="📊 Месяц",  callback_data="stats:month")
-    builder.adjust(3)
+    builder.button(text="📅 День",          callback_data="stats:day")
+    builder.button(text="📆 Неделя",        callback_data="stats:week")
+    builder.button(text="📊 Месяц",         callback_data="stats:month")
+    builder.button(text="🗓 Сетка недели",  callback_data="stats:grid_week")
+    builder.button(text="🗓 Сетка месяца",  callback_data="stats:grid_month")
+    builder.adjust(3, 2)
     return builder.as_markup()
