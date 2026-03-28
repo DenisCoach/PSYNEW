@@ -5,8 +5,7 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram import Bot
 
-from config import NOTIFY_HOURS_START, NOTIFY_HOURS_END
-from database import get_all_users, mark_notification_sent
+from database import get_all_users, mark_notification_sent, get_notification_hours
 from keyboards import notification_keyboard
 
 logger = logging.getLogger(__name__)
@@ -15,12 +14,11 @@ logger = logging.getLogger(__name__)
 async def send_hourly_notifications(bot: Bot):
     """
     Runs every minute. For each user checks if it is XX:00 in their timezone
-    and the hour falls within the notification window. Sends once per hour
-    thanks to deduplication in notifications_sent table.
+    and the hour is in their personal notification schedule.
     """
     users = await get_all_users()
 
-    for user_id, timezone in users:
+    for user_id, timezone, _ in users:
         try:
             tz = pytz.timezone(timezone)
             now = datetime.now(tz)
@@ -29,16 +27,19 @@ async def send_hourly_notifications(bot: Bot):
                 continue
 
             hour = now.hour
-            if not (NOTIFY_HOURS_START <= hour <= NOTIFY_HOURS_END):
+            # hour_slot = the period just completed (notify at 12:00 → ask about 11:00–12:00)
+            # At 00:00 → ask about 23:00–00:00
+            hour_slot = (hour - 1) % 24
+
+            # Check user's personal schedule
+            user_hours = await get_notification_hours(user_id)
+            if hour_slot not in user_hours:
                 continue
 
-            # hour_slot = the hour period JUST completed (10 means 10:00–11:00)
-            hour_slot = hour - 1
             date_str = now.date().isoformat()
-
             sent = await mark_notification_sent(user_id, date_str, hour_slot)
             if not sent:
-                continue  # already sent this notification
+                continue  # already sent
 
             await bot.send_message(
                 user_id,

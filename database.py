@@ -7,10 +7,11 @@ async def init_db():
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id   INTEGER PRIMARY KEY,
-                username  TEXT,
-                timezone  TEXT NOT NULL DEFAULT 'Europe/Moscow',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                user_id            INTEGER PRIMARY KEY,
+                username           TEXT,
+                timezone           TEXT NOT NULL DEFAULT 'Europe/Moscow',
+                notification_hours TEXT NOT NULL DEFAULT '10,11,12,13,14,15,16,17,18,19,20,21',
+                created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
             CREATE TABLE IF NOT EXISTS contexts (
@@ -43,7 +44,15 @@ async def init_db():
                 PRIMARY KEY (user_id, notification_date, hour_slot)
             );
         """)
-        await db.commit()
+        # Migration: add notification_hours column if missing
+        try:
+            await db.execute(
+                "ALTER TABLE users ADD COLUMN notification_hours TEXT NOT NULL "
+                "DEFAULT '10,11,12,13,14,15,16,17,18,19,20,21'"
+            )
+            await db.commit()
+        except Exception:
+            pass  # Column already exists
 
 
 # ── Users ─────────────────────────────────────────────────────────────────────
@@ -86,8 +95,41 @@ async def get_user(user_id: int) -> Optional[Tuple]:
 
 async def get_all_users() -> List[Tuple]:
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        cur = await db.execute("SELECT user_id, timezone FROM users")
+        cur = await db.execute("SELECT user_id, timezone, notification_hours FROM users")
         return await cur.fetchall()
+
+
+async def get_notification_hours(user_id: int) -> List[int]:
+    """Returns list of hours when user wants notifications, e.g. [10, 12, 15, 18]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT notification_hours FROM users WHERE user_id = ?", (user_id,)
+        )
+        row = await cur.fetchone()
+        if not row or not row[0]:
+            return list(range(0, 24))
+        return sorted([int(h) for h in row[0].split(",") if h.strip().isdigit()])
+
+
+async def set_notification_hours(user_id: int, hours: List[int]):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        hours_str = ",".join(str(h) for h in sorted(hours))
+        await db.execute(
+            "UPDATE users SET notification_hours = ? WHERE user_id = ?",
+            (hours_str, user_id),
+        )
+        await db.commit()
+
+
+async def toggle_notification_hour(user_id: int, hour: int) -> List[int]:
+    """Toggle a single hour on/off. Returns the updated hours list."""
+    hours = await get_notification_hours(user_id)
+    if hour in hours:
+        hours = [h for h in hours if h != hour]
+    else:
+        hours = sorted(hours + [hour])
+    await set_notification_hours(user_id, hours)
+    return hours
 
 
 # ── Contexts ──────────────────────────────────────────────────────────────────

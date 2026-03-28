@@ -15,10 +15,11 @@ from database import (
     register_user, user_exists, update_timezone, get_user,
     get_user_contexts, get_or_create_context, add_activity,
     get_activities_for_period, get_all_users_stats, get_user_full_stats,
+    get_notification_hours, toggle_notification_hour,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, contexts_keyboard,
-    after_activity_keyboard, stats_keyboard,
+    after_activity_keyboard, stats_keyboard, schedule_keyboard,
 )
 from states import Registration, ActivityFSM
 
@@ -403,6 +404,34 @@ def _format_stats(
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 
+@router.message(Command("schedule"))
+async def cmd_schedule(message: Message):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    hours = await get_notification_hours(message.from_user.id)
+    await message.answer(
+        "⏰ <b>Настройка расписания</b>\n\n"
+        "Выбери в какие часы получать напоминания.\n"
+        "Каждое напоминание спрашивает о <b>предыдущем</b> часе.\n"
+        "Например: ✅ 12 → спросит «что делал с 11 до 12?»\n\n"
+        "Нажми на час чтобы включить/выключить:",
+        parse_mode="HTML",
+        reply_markup=schedule_keyboard(hours),
+    )
+
+
+@router.callback_query(F.data.startswith("sched:"))
+async def cb_toggle_hour(callback: CallbackQuery):
+    hour = int(callback.data.split(":")[1])
+    updated_hours = await toggle_notification_hour(callback.from_user.id, hour)
+    await callback.message.edit_reply_markup(
+        reply_markup=schedule_keyboard(updated_hours)
+    )
+    status = "включён ✅" if hour in updated_hours else "выключен ☐"
+    await callback.answer(f"{hour}:00 {status}")
+
+
 @router.message(Command("myid"))
 async def cmd_myid(message: Message):
     await message.answer(f"Твой Telegram ID: `{message.from_user.id}`", parse_mode="Markdown")
@@ -495,6 +524,7 @@ async def cmd_help(message: Message):
         "/start — регистрация\n"
         "/add — добавить дело вручную\n"
         "/stats — просмотр статистики\n"
+        "/schedule — настройка расписания уведомлений\n"
         "/timezone — сменить часовой пояс\n"
         "/cancel — отменить текущее действие\n"
         "/help — эта справка",

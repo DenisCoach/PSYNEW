@@ -44,6 +44,16 @@ def after_activity_keyboard(date_str: str, hour: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def schedule_keyboard(active_hours: List[int]) -> InlineKeyboardMarkup:
+    """Grid of all 24 hours. Active = ✅, inactive = ☐"""
+    builder = InlineKeyboardBuilder()
+    for hour in range(0, 24):
+        label = f"✅ {hour:02d}" if hour in active_hours else f"☐ {hour:02d}"
+        builder.button(text=label, callback_data=f"sched:{hour}")
+    builder.adjust(4)
+    return builder.as_markup()
+
+
 def stats_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📅 День",    callback_data="stats:day")
