@@ -1,17 +1,22 @@
 import re
+import os
+import asyncio
 import logging
 import functools
+import subprocess
+import tempfile
 from datetime import datetime, timedelta
+from io import BytesIO
 from typing import Optional, List, Tuple
 
 import pytz
-from aiogram import Router, F
+from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 
 from config import TIMEZONES, NOTIFY_HOURS_START, NOTIFY_HOURS_END, ADMIN_IDS
-from visualizer import generate_grid
+from visualizer import generate_grid, generate_dynamics
 from database import (
     register_user, user_exists, update_timezone, get_user,
     get_user_contexts, get_or_create_context, add_activity,
@@ -24,6 +29,8 @@ from database import (
     get_export_activities, set_goal, delete_goal, get_goals_with_progress,
     update_activity_tags, save_day_note, get_day_note, delete_day_note,
     get_week_comparison,
+    get_top_activities, get_streak, get_hour_patterns,
+    get_templates, get_template_by_id, add_template, delete_template, increment_template_use,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, contexts_keyboard,
@@ -31,11 +38,17 @@ from keyboards import (
     activities_list_keyboard, edit_menu_keyboard, delete_confirm_keyboard,
     contexts_list_keyboard, context_menu_keyboard, color_picker_keyboard,
     ctx_delete_confirm_keyboard, goals_contexts_keyboard, export_keyboard,
-    tags_keyboard, PREDEFINED_TAGS,
+    tags_keyboard, templates_keyboard, PREDEFINED_TAGS,
 )
 import csv
 import io
 from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM
+
+try:
+    import speech_recognition as sr
+    _HAS_SR = True
+except ImportError:
+    _HAS_SR = False
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -87,6 +100,42 @@ def _tz_label(tz: str) -> str:
     return next((k for k, v in TIMEZONES.items() if v == tz), tz)
 
 
+async def _transcribe_voice(voice_bytes: bytes) -> Optional[str]:
+    """Download voice bytes (ogg/opus) → convert via ffmpeg → Google STT → text."""
+    if not _HAS_SR:
+        return None
+
+    def _blocking():
+        ogg_path = wav_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+                f.write(voice_bytes)
+                ogg_path = f.name
+            wav_path = ogg_path[:-4] + ".wav"
+            res = subprocess.run(
+                ["ffmpeg", "-i", ogg_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path, "-y"],
+                capture_output=True, timeout=30,
+            )
+            if res.returncode != 0:
+                return None
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_path) as source:
+                audio = recognizer.record(source)
+            return recognizer.recognize_google(audio, language="ru-RU")
+        except Exception as exc:
+            logger.warning("Voice transcription failed: %s", exc)
+            return None
+        finally:
+            for p in [ogg_path, wav_path]:
+                if p:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
+
+    return await asyncio.to_thread(_blocking)
+
+
 # ── Registration ──────────────────────────────────────────────────────────────
 
 WELCOME_TEXT = """👋 Привет! Я помогаю отслеживать куда уходит твоё время.
@@ -116,17 +165,29 @@ WELCOME_TEXT = """👋 Привет! Я помогаю отслеживать к
 ━━━━━━━━━━━━━━━━━━━━━━
 📊 <b>СТАТИСТИКА</b>
 
-/stats — пять режимов просмотра:
-• <b>День</b> — все записи за сегодня по часам
+/stats — семь режимов просмотра:
+• <b>День</b> — все записи за сегодня по часам (🔥 серия дней)
 • <b>Неделя / Месяц</b> — сводка с % по контекстам
-• <b>Сетка недели / Сетка месяца</b> — картинка-грид, где каждый час закрашен цветом контекста
+• <b>Сетка недели / Сетка месяца</b> — картинка-грид, где каждый час закрашен цветом контекста (справа — часы за день)
 • <b>Сравнение недель</b> — эта неделя vs прошлая по каждому контексту
+• <b>Динамика</b> — линейный график: как менялись часы по контекстам неделя за неделей
+
+/top — топ-10 самых частых дел
+/patterns — паттерны продуктивности по времени суток
 
 ━━━━━━━━━━━━━━━━━━━━━━
 🎯 <b>ЦЕЛИ</b>
 
 /goals — задай сколько часов в неделю хочешь тратить на каждый контекст и следи за прогрессом:
 <code>█████░░░░░  5ч / 10ч  (50%)</code>
+
+━━━━━━━━━━━━━━━━━━━━━━
+⚡ <b>БЫСТРЫЕ ДЕЛА</b>
+
+/quick — добавить дело одним нажатием по сохранённому шаблону.
+После сохранения любого дела нажми <b>💾 Шаблон</b> — и оно попадёт в быстрый список.
+
+🎤 Можешь отправить <b>голосовое сообщение</b> — бот распознает и предложит заполнить запись.
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ⏰ <b>РАСПИСАНИЕ УВЕДОМЛЕНИЙ</b>
@@ -163,7 +224,7 @@ WELCOME_TEXT = """👋 Привет! Я помогаю отслеживать к
 
 ━━━━━━━━━━━━━━━━━━━━━━
 <b>Все команды:</b>
-/add · /edit · /note · /stats · /goals · /contexts · /schedule · /export · /timezone · /cancel"""
+/add · /quick · /edit · /note · /stats · /top · /patterns · /goals · /contexts · /schedule · /export · /timezone · /cancel"""
 
 
 @router.message(CommandStart())
@@ -413,7 +474,7 @@ async def cb_tag_save(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
         f"🏷 {tag_text}",
-        reply_markup=after_activity_keyboard(data["date_str"], data["hour"]),
+        reply_markup=after_activity_keyboard(data["date_str"], data["hour"], act_id),
     )
     await callback.answer()
 
@@ -932,6 +993,225 @@ async def cmd_cancel(message: Message, state: FSMContext):
     await message.answer("❌ Отменено.")
 
 
+# ── Top activities ────────────────────────────────────────────────────────────
+
+@router.message(Command("top"))
+async def cmd_top(message: Message):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    rows = await get_top_activities(message.from_user.id, limit=10)
+    if not rows:
+        await message.answer("Нет данных.")
+        return
+    lines = ["🏆 <b>Топ активностей</b>\n"]
+    for i, (desc, ctx_name, color, cnt, total_m) in enumerate(rows, 1):
+        lines.append(
+            f"{i}. {color} <b>{desc}</b>\n"
+            f"   {ctx_name} · {cnt} раз · {fmt_dur(total_m)} всего\n"
+        )
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ── Time-of-day patterns ──────────────────────────────────────────────────────
+
+@router.message(Command("patterns"))
+async def cmd_patterns(message: Message):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    rows = await get_hour_patterns(message.from_user.id)
+    if not rows:
+        await message.answer("Нет данных.")
+        return
+
+    # For each hour keep only the top context (already sorted by total_m desc within hour)
+    hours_top: dict = {}
+    for hour, ctx_name, color, total_m in rows:
+        if hour not in hours_top:
+            hours_top[hour] = (ctx_name, color, total_m)
+
+    lines = ["🕐 <b>Паттерны по времени суток</b>\n"]
+    for hour in sorted(hours_top):
+        ctx_name, color, total_m = hours_top[hour]
+        bar = "█" * min(int(total_m / 60 * 2), 12)
+        lines.append(f"{hour:02d}:00  {color} {ctx_name:<14} {bar} {fmt_dur(total_m)}")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ── Quick activities (templates) ──────────────────────────────────────────────
+
+@router.message(Command("quick"))
+async def cmd_quick(message: Message):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    templates = await get_templates(message.from_user.id)
+    if not templates:
+        await message.answer(
+            "У тебя пока нет шаблонов быстрых дел.\n\n"
+            "После сохранения любого дела нажми <b>💾 Шаблон</b> — "
+            "и оно появится здесь.",
+            parse_mode="HTML",
+        )
+        return
+    await message.answer(
+        "⚡ <b>Быстрые дела</b>\n\nВыбери шаблон — запись добавится за текущий час:",
+        parse_mode="HTML",
+        reply_markup=templates_keyboard(templates),
+    )
+
+
+@router.callback_query(F.data.startswith("qt:"))
+async def cb_quick_use(callback: CallbackQuery):
+    tmpl_id  = int(callback.data.split(":")[1])
+    tmpl     = await get_template_by_id(tmpl_id, callback.from_user.id)
+    if not tmpl:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+
+    _, ctx_id, ctx_name, color, desc, dur = tmpl
+    user     = await get_user(callback.from_user.id)
+    tz       = pytz.timezone(user[2])
+    now      = datetime.now(tz)
+    date_str = now.date().isoformat()
+    hour     = now.hour
+
+    act_id = await add_activity(
+        user_id=callback.from_user.id,
+        context_id=ctx_id,
+        description=desc,
+        duration_minutes=dur,
+        activity_date=date_str,
+        hour_slot=hour,
+    )
+    await increment_template_use(tmpl_id, callback.from_user.id)
+
+    await callback.message.edit_text(
+        f"✅ Записано!\n\n"
+        f"{color} {ctx_name}  ·  {desc}  ·  {fmt_dur(dur)}\n"
+        f"📅 {date_str}  🕐 {hour:02d}:00",
+        reply_markup=after_activity_keyboard(date_str, hour, act_id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "qt_manage")
+async def cb_quick_manage(callback: CallbackQuery):
+    templates = await get_templates(callback.from_user.id)
+    if not templates:
+        await callback.message.edit_text("Шаблонов нет.")
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        "🗑 <b>Управление шаблонами</b>\n\nНажми 🗑 рядом с шаблоном чтобы удалить:",
+        parse_mode="HTML",
+        reply_markup=templates_keyboard(templates, manage=True),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("qt_del:"))
+async def cb_quick_delete(callback: CallbackQuery):
+    tmpl_id = int(callback.data.split(":")[1])
+    await delete_template(tmpl_id, callback.from_user.id)
+    templates = await get_templates(callback.from_user.id)
+    if templates:
+        await callback.message.edit_text(
+            "✅ Удалено.\n\n🗑 <b>Управление шаблонами:</b>",
+            parse_mode="HTML",
+            reply_markup=templates_keyboard(templates, manage=True),
+        )
+    else:
+        await callback.message.edit_text("✅ Шаблон удалён. Шаблонов больше нет.")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "qt_back")
+async def cb_quick_back(callback: CallbackQuery):
+    templates = await get_templates(callback.from_user.id)
+    if not templates:
+        await callback.message.edit_text("Шаблонов нет.")
+        await callback.answer()
+        return
+    await callback.message.edit_text(
+        "⚡ <b>Быстрые дела</b>\n\nВыбери шаблон — запись добавится за текущий час:",
+        parse_mode="HTML",
+        reply_markup=templates_keyboard(templates),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("act_tmpl:"))
+async def cb_save_template(callback: CallbackQuery):
+    act_id = int(callback.data.split(":")[1])
+    act    = await get_activity_by_id(act_id, callback.from_user.id)
+    if not act:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+    # act: (id, date, hour, ctx_name, color, desc, dur)
+    # Need context_id — look it up via context name
+    contexts = await get_user_contexts(callback.from_user.id)
+    ctx_match = next((c for c in contexts if c[1] == act[3]), None)
+    if not ctx_match:
+        await callback.answer("Контекст не найден", show_alert=True)
+        return
+    await add_template(callback.from_user.id, ctx_match[0], act[5], act[6])
+    await callback.answer("💾 Шаблон сохранён!", show_alert=False)
+
+
+# ── Voice input ───────────────────────────────────────────────────────────────
+
+@router.message(F.voice)
+async def handle_voice(message: Message, state: FSMContext, bot: Bot):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+
+    await message.answer("🎤 Распознаю голос…")
+
+    buf = BytesIO()
+    await bot.download(message.voice, destination=buf)
+    text = await _transcribe_voice(buf.getvalue())
+
+    if not text:
+        await message.answer(
+            "❌ Не удалось распознать голос.\n"
+            "Используй /add чтобы добавить дело вручную."
+        )
+        return
+
+    # Try to extract duration from the transcription
+    duration = parse_duration(text)
+    user     = await get_user(message.from_user.id)
+    tz       = pytz.timezone(user[2])
+    now      = datetime.now(tz)
+    date_str = now.date().isoformat()
+    hour     = now.hour
+
+    await message.answer(f"📝 Распознано: <i>{text}</i>", parse_mode="HTML")
+    await state.update_data(date_str=date_str, hour=hour, description=text)
+
+    if duration and duration <= 600:
+        # Duration found in transcription — skip to context
+        await state.update_data(duration=duration)
+        await state.set_state(ActivityFSM.choosing_context)
+        contexts = await get_user_contexts(message.from_user.id)
+        await message.answer(
+            f"⏱ Длительность: <b>{fmt_dur(duration)}</b>\n\n🏷 Выбери контекст:",
+            parse_mode="HTML",
+            reply_markup=contexts_keyboard(contexts, date_str, hour),
+        )
+    else:
+        await state.set_state(ActivityFSM.waiting_duration)
+        await message.answer(
+            "⏱ Сколько времени это заняло?\n\n"
+            "Примеры: <code>30</code>  <code>45 мин</code>  <code>1ч</code>  <code>1ч 30мин</code>",
+            parse_mode="HTML",
+        )
+
+
 # ── Statistics ────────────────────────────────────────────────────────────────
 
 @router.message(Command("stats"))
@@ -951,7 +1231,9 @@ async def cb_stats(callback: CallbackQuery):
 
     if period == "day":
         start, end = today, today
-        title = today.strftime("📅 %d %B %Y")
+        streak = await get_streak(callback.from_user.id, today.isoformat())
+        streak_str = f"  🔥 {streak} дн подряд" if streak >= 2 else ""
+        title = today.strftime("📅 %d %B %Y") + streak_str
     elif period == "week":
         start = today - timedelta(days=today.weekday())
         end = today
@@ -1014,6 +1296,17 @@ async def cb_stats(callback: CallbackQuery):
             doc = BufferedInputFile(image.read(), filename="grid.png")
             await callback.message.answer_document(document=doc, caption=f"🗓 {title}")
         return
+
+    elif period == "dynamics":
+        await callback.answer("⏳ Генерирую...")
+        image = await generate_dynamics(callback.from_user.id)
+        if not image:
+            await callback.message.answer("😔 Недостаточно данных для графика (нужно хотя бы 2 недели).")
+        else:
+            doc = BufferedInputFile(image.read(), filename="dynamics.png")
+            await callback.message.answer_document(document=doc, caption="📈 Динамика по неделям")
+        return
+
     else:
         return
 

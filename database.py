@@ -65,11 +65,34 @@ async def init_db():
                 FOREIGN KEY (user_id)   REFERENCES users(user_id),
                 FOREIGN KEY (context_id) REFERENCES contexts(id)
             );
+
+            CREATE TABLE IF NOT EXISTS templates (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id          INTEGER NOT NULL,
+                context_id       INTEGER NOT NULL,
+                description      TEXT    NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                use_count        INTEGER NOT NULL DEFAULT 0,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id)    REFERENCES users(user_id),
+                FOREIGN KEY (context_id) REFERENCES contexts(id)
+            );
         """)
         # Migrations for existing databases
         for sql in [
             "ALTER TABLE users ADD COLUMN notification_hours TEXT NOT NULL DEFAULT '10,11,12,13,14,15,16,17,18,19,20,21'",
             "ALTER TABLE activities ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+            """CREATE TABLE IF NOT EXISTS templates (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id          INTEGER NOT NULL,
+                context_id       INTEGER NOT NULL,
+                description      TEXT    NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                use_count        INTEGER NOT NULL DEFAULT 0,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id)    REFERENCES users(user_id),
+                FOREIGN KEY (context_id) REFERENCES contexts(id)
+            )""",
         ]:
             try:
                 await db.execute(sql)
@@ -542,3 +565,162 @@ async def mark_notification_sent(user_id: int, date_str: str, hour_slot: int) ->
             return True
         except aiosqlite.IntegrityError:
             return False
+
+
+# ── Templates (quick activities) ─────────────────────────────────────────────
+
+async def get_templates(user_id: int) -> List[Tuple]:
+    """Returns [(id, ctx_name, color, description, duration_minutes, use_count), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT t.id, c.name, c.color, t.description, t.duration_minutes, t.use_count
+               FROM templates t
+               JOIN contexts c ON t.context_id = c.id
+               WHERE t.user_id = ?
+               ORDER BY t.use_count DESC, t.created_at DESC""",
+            (user_id,),
+        )
+        return await cur.fetchall()
+
+
+async def get_template_by_id(template_id: int, user_id: int) -> Optional[Tuple]:
+    """Returns (id, context_id, ctx_name, color, description, duration_minutes)"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT t.id, t.context_id, c.name, c.color, t.description, t.duration_minutes
+               FROM templates t
+               JOIN contexts c ON t.context_id = c.id
+               WHERE t.id = ? AND t.user_id = ?""",
+            (template_id, user_id),
+        )
+        return await cur.fetchone()
+
+
+async def add_template(
+    user_id: int, context_id: int, description: str, duration_minutes: int
+) -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO templates (user_id, context_id, description, duration_minutes)
+               VALUES (?, ?, ?, ?)""",
+            (user_id, context_id, description, duration_minutes),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def delete_template(template_id: int, user_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM templates WHERE id = ? AND user_id = ?",
+            (template_id, user_id),
+        )
+        await db.commit()
+
+
+async def increment_template_use(template_id: int, user_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE templates SET use_count = use_count + 1 WHERE id = ? AND user_id = ?",
+            (template_id, user_id),
+        )
+        await db.commit()
+
+
+# ── Analytics ────────────────────────────────────────────────────────────────
+
+async def get_top_activities(user_id: int, limit: int = 10) -> List[Tuple]:
+    """Returns [(description, ctx_name, color, count, total_minutes), ...] most frequent."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT a.description, c.name, c.color,
+                      COUNT(*) as cnt, SUM(a.duration_minutes) as total_m
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ?
+               GROUP BY LOWER(a.description), c.id
+               ORDER BY cnt DESC
+               LIMIT ?""",
+            (user_id, limit),
+        )
+        return await cur.fetchall()
+
+
+async def get_streak(user_id: int, today_str: str) -> int:
+    """Returns number of consecutive days with at least one activity, ending today or yesterday."""
+    from datetime import date, timedelta
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT DISTINCT activity_date FROM activities WHERE user_id = ? ORDER BY activity_date DESC",
+            (user_id,),
+        )
+        dates = [row[0] for row in await cur.fetchall()]
+    if not dates:
+        return 0
+    today = date.fromisoformat(today_str)
+    latest = date.fromisoformat(dates[0])
+    if latest < today - timedelta(days=1):
+        return 0
+    streak = 0
+    expected = latest
+    for d_str in dates:
+        d = date.fromisoformat(d_str)
+        if d == expected:
+            streak += 1
+            expected -= timedelta(days=1)
+        else:
+            break
+    return streak
+
+
+async def get_hour_patterns(user_id: int) -> List[Tuple]:
+    """Returns [(hour_slot, ctx_name, color, total_minutes), ...] ordered by hour then minutes desc."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT a.hour_slot, c.name, c.color, SUM(a.duration_minutes) as total_m
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ?
+               GROUP BY a.hour_slot, c.id
+               ORDER BY a.hour_slot, total_m DESC""",
+            (user_id,),
+        )
+        return await cur.fetchall()
+
+
+async def get_weekly_dynamics(user_id: int, weeks: int = 8) -> List[Tuple]:
+    """Returns [(week_key, ctx_name, color, total_minutes, week_start_date), ...] for last N weeks."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT strftime('%Y-%W', a.activity_date) as week_key,
+                      c.name, c.color,
+                      SUM(a.duration_minutes) as total_m,
+                      MIN(a.activity_date) as week_start_date
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ?
+               GROUP BY week_key, c.id
+               ORDER BY week_key""",
+            (user_id,),
+        )
+        all_rows = await cur.fetchall()
+    if not all_rows:
+        return []
+    all_weeks = sorted(set(r[0] for r in all_rows))
+    recent_weeks = set(all_weeks[-weeks:])
+    return [r for r in all_rows if r[0] in recent_weeks]
+
+
+async def get_goals_below_threshold(
+    user_id: int, week_start: str, week_end: str, threshold: float = 0.30
+) -> List[Tuple]:
+    """Returns [(ctx_name, color, target_hours, actual_minutes, pct), ...] for goals below threshold."""
+    rows = await get_goals_with_progress(user_id, week_start, week_end)
+    result = []
+    for ctx_name, color, target_h, ctx_id, actual_m in rows:
+        if target_h <= 0:
+            continue
+        pct = actual_m / 60 / target_h
+        if pct < threshold:
+            result.append((ctx_name, color, target_h, actual_m, pct))
+    return result

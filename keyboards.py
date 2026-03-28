@@ -6,6 +6,13 @@ from config import TIMEZONES
 MAX_CONTEXTS_SHOWN = 8
 
 
+def _fmt_dur(minutes: int) -> str:
+    if minutes < 60:
+        return f"{minutes}м"
+    h, m = divmod(minutes, 60)
+    return f"{h}ч" if m == 0 else f"{h}ч{m}м"
+
+
 def timezone_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for label, tz in TIMEZONES.items():
@@ -36,10 +43,12 @@ def contexts_keyboard(
     return builder.as_markup()
 
 
-def after_activity_keyboard(date_str: str, hour: int) -> InlineKeyboardMarkup:
+def after_activity_keyboard(date_str: str, hour: int, act_id: int = 0) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Добавить ещё", callback_data=f"act_more:{date_str}:{hour}")
     builder.button(text="✅ Готово",        callback_data=f"act_done:{date_str}:{hour}")
+    if act_id:
+        builder.button(text="💾 Шаблон",   callback_data=f"act_tmpl:{act_id}")
     builder.adjust(2)
     return builder.as_markup()
 
@@ -145,6 +154,24 @@ def schedule_keyboard(active_hours: List[int]) -> InlineKeyboardMarkup:
 PREDEFINED_TAGS = ["важное", "срочное", "рутина", "фокус", "встреча", "отдых"]
 
 
+def templates_keyboard(templates: List[Tuple], manage: bool = False) -> InlineKeyboardMarkup:
+    """templates: [(id, ctx_name, color, description, duration_minutes, use_count), ...]"""
+    builder = InlineKeyboardBuilder()
+    for tmpl_id, ctx_name, color, desc, dur, _ in templates:
+        short = desc[:22] + "…" if len(desc) > 22 else desc
+        label = f"{color} {short} · {_fmt_dur(dur)}"
+        builder.button(text=label, callback_data=f"qt:{tmpl_id}")
+        if manage:
+            builder.button(text="🗑", callback_data=f"qt_del:{tmpl_id}")
+    if manage:
+        builder.button(text="◀️ Назад", callback_data="qt_back")
+        builder.adjust(*([2] * len(templates) + [1]))
+    else:
+        builder.button(text="🗑 Управление шаблонами", callback_data="qt_manage")
+        builder.adjust(*([1] * len(templates) + [1]))
+    return builder.as_markup()
+
+
 def tags_keyboard(selected: List[str], act_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for tag in PREDEFINED_TAGS:
@@ -163,5 +190,6 @@ def stats_keyboard() -> InlineKeyboardMarkup:
     builder.button(text="🗓 Сетка недели",  callback_data="stats:grid_week")
     builder.button(text="🗓 Сетка месяца",  callback_data="stats:grid_month")
     builder.button(text="↔️ Сравнение недель", callback_data="stats:compare")
-    builder.adjust(3, 2, 1)
+    builder.button(text="📈 Динамика",      callback_data="stats:dynamics")
+    builder.adjust(3, 2, 1, 1)
     return builder.as_markup()
