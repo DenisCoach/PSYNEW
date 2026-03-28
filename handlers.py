@@ -86,22 +86,85 @@ def _tz_label(tz: str) -> str:
 
 # ── Registration ──────────────────────────────────────────────────────────────
 
+WELCOME_TEXT = """👋 Привет! Я помогаю отслеживать куда уходит твоё время.
+
+Каждый час я буду спрашивать чем ты занимался — ты указываешь дело, контекст и длительность. Со временем появляется полная картина твоей недели и месяца.
+
+━━━━━━━━━━━━━━━━━━━━━━
+📋 <b>КАК ЭТО РАБОТАЕТ</b>
+
+Каждый час бот присылает вопрос:
+<i>«Чем ты занимался с 14:00 до 15:00?»</i>
+
+Ты нажимаешь ➕ и вводишь:
+1. Описание — что делал
+2. Длительность — сколько времени (напр. <code>45 мин</code> или <code>1ч 30мин</code>)
+3. Контекст — категория дела (Работа, Спорт, Учёба и т.д.)
+
+За один час можно добавить несколько дел из разных контекстов.
+
+━━━━━━━━━━━━━━━━━━━━━━
+🗂 <b>КОНТЕКСТЫ</b>
+
+Контексты — это категории твоих дел. Они накапливаются сами и предлагаются на выбор. Каждому контексту присваивается свой цвет.
+
+/contexts — переименовать, сменить цвет или удалить контекст
+
+━━━━━━━━━━━━━━━━━━━━━━
+📊 <b>СТАТИСТИКА</b>
+
+/stats — четыре режима просмотра:
+• <b>День</b> — все записи за сегодня по часам
+• <b>Неделя / Месяц</b> — сводка с % по контекстам
+• <b>Сетка недели / Сетка месяца</b> — картинка-грид, где каждый час закрашен цветом контекста
+
+━━━━━━━━━━━━━━━━━━━━━━
+🎯 <b>ЦЕЛИ</b>
+
+/goals — задай сколько часов в неделю хочешь тратить на каждый контекст и следи за прогрессом:
+<code>█████░░░░░  5ч / 10ч  (50%)</code>
+
+━━━━━━━━━━━━━━━━━━━━━━
+⏰ <b>РАСПИСАНИЕ УВЕДОМЛЕНИЙ</b>
+
+/schedule — выбери в какие именно часы получать напоминания. Можно включить любые из 24 часов.
+
+По умолчанию: с 10:00 до 21:00 каждый час.
+
+Если ты не записывал ничего 3 часа подряд — бот предупредит об этом.
+
+Каждый день в 21:00 — автоматический итог дня.
+
+━━━━━━━━━━━━━━━━━━━━━━
+✏️ <b>РЕДАКТИРОВАНИЕ</b>
+
+/edit — выбери любую из последних 10 записей и измени описание, время или контекст, либо удали её.
+
+━━━━━━━━━━━━━━━━━━━━━━
+📤 <b>ЭКСПОРТ</b>
+
+/export — выгрузи все данные в CSV файл (за неделю, месяц или всё время).
+
+━━━━━━━━━━━━━━━━━━━━━━
+<b>Все команды:</b>
+/add · /edit · /stats · /goals · /contexts · /schedule · /export · /timezone"""
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     if await user_exists(message.from_user.id):
         await message.answer(
-            "👋 Ты уже зарегистрирован!\n\n"
-            "/stats — статистика\n"
-            "/add — добавить дело вручную\n"
-            "/timezone — сменить часовой пояс"
+            WELCOME_TEXT + "\n\n📍 Твой часовой пояс и расписание уже настроены.",
+            parse_mode="HTML",
         )
         return
     await state.set_state(Registration.choosing_timezone)
     await message.answer(
-        "👋 Привет! Я буду помогать отслеживать куда уходит твоё время.\n\n"
-        f"Каждый час с {NOTIFY_HOURS_START - 1}:00 до {NOTIFY_HOURS_END}:00 "
-        "буду спрашивать чем ты занимался.\n\n"
-        "📍 Выбери свой часовой пояс:",
+        WELCOME_TEXT,
+        parse_mode="HTML",
+    )
+    await message.answer(
+        "📍 Для начала выбери свой часовой пояс:",
         reply_markup=timezone_keyboard(),
     )
 
@@ -681,8 +744,7 @@ async def cmd_goals(message: Message, state: FSMContext):
     await _show_goals(message.from_user.id, message)
 
 
-async def _show_goals(user_id: int, target):
-    """target can be Message or CallbackQuery.message"""
+async def _show_goals(user_id: int, target, edit: bool = False):
     tz      = pytz.timezone((await get_user(user_id))[2])
     today   = datetime.now(tz).date()
     w_start = today - timedelta(days=today.weekday())
@@ -690,17 +752,15 @@ async def _show_goals(user_id: int, target):
 
     progress = await get_goals_with_progress(user_id, w_start.isoformat(), w_end.isoformat())
     contexts = await get_user_contexts(user_id)
-
-    goals_dict = {row[3]: row[2] for row in progress}  # {ctx_id: weekly_hours}
+    goals_dict = {row[3]: row[2] for row in progress}
 
     lines = [f"🎯 <b>Цели на неделю</b>  ({w_start.strftime('%d.%m')}–{w_end.strftime('%d.%m')})\n"]
 
     if progress:
         for ctx_name, color, target_h, ctx_id, actual_m in progress:
-            actual_h  = actual_m / 60
-            pct       = min(int(actual_h / target_h * 100), 100) if target_h else 0
-            filled    = pct // 10
-            bar       = "█" * filled + "░" * (10 - filled)
+            actual_h = actual_m / 60
+            pct      = min(int(actual_h / target_h * 100), 100) if target_h else 0
+            bar      = "█" * (pct // 10) + "░" * (10 - pct // 10)
             lines.append(
                 f"{color} <b>{ctx_name}</b>\n"
                 f"  {bar} {fmt_dur(actual_m)} / {target_h:.0f}ч  ({pct}%)\n"
@@ -708,12 +768,12 @@ async def _show_goals(user_id: int, target):
     else:
         lines.append("Целей пока нет.\n")
 
-    lines.append("Нажми на контекст чтобы установить цель:")
+    lines.append("Нажми на контекст чтобы установить или изменить цель:")
 
     text = "\n".join(lines)
     kb   = goals_contexts_keyboard(contexts, goals_dict)
 
-    if hasattr(target, "edit_text"):
+    if edit:
         await target.edit_text(text, parse_mode="HTML", reply_markup=kb)
     else:
         await target.answer(text, parse_mode="HTML", reply_markup=kb)
@@ -731,10 +791,16 @@ async def cb_goal_select(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"🎯 Цель для {ctx[2]} <b>{ctx[1]}</b>\n\n"
         "Сколько часов в неделю хочешь тратить?\n"
-        "Введи число (например <code>10</code> или <code>2.5</code>)\n"
+        "Введи число, например <code>10</code> или <code>2.5</code>\n"
         "Введи <code>0</code> чтобы удалить цель.",
         parse_mode="HTML",
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "goals_back")
+async def cb_goals_back(callback: CallbackQuery):
+    await _show_goals(callback.from_user.id, callback.message, edit=True)
     await callback.answer()
 
 
@@ -1013,18 +1079,4 @@ async def cmd_admin_user(message: Message):
 
 @router.message(Command("help"))
 async def cmd_help(message: Message):
-    await message.answer(
-        "<b>Команды:</b>\n\n"
-        "/start — регистрация\n"
-        "/add — добавить дело вручную\n"
-        "/edit — редактировать или удалить запись\n"
-        "/contexts — управление контекстами\n"
-        "/goals — цели по контекстам на неделю\n"
-        "/export — выгрузить данные в CSV\n"
-        "/stats — просмотр статистики\n"
-        "/schedule — настройка расписания уведомлений\n"
-        "/timezone — сменить часовой пояс\n"
-        "/cancel — отменить текущее действие\n"
-        "/help — эта справка",
-        parse_mode="HTML",
-    )
+    await message.answer(WELCOME_TEXT, parse_mode="HTML")
