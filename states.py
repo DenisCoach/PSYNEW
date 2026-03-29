@@ -29,3 +29,7 @@ class GoalFSM(StatesGroup):
 
 class NoteFSM(StatesGroup):
     waiting_text = State()
+
+
+class NotifFSM(StatesGroup):
+    quick_adding = State()

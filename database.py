@@ -629,6 +629,23 @@ async def increment_template_use(template_id: int, user_id: int):
 
 # ── Analytics ────────────────────────────────────────────────────────────────
 
+async def get_recent_unique_for_quick(user_id: int, limit: int = 6) -> List[Tuple]:
+    """Returns recent unique (description, context) pairs for quick-add buttons.
+    Returns [(act_id, ctx_name, color, description, duration_minutes), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT a.id, c.name, c.color, a.description, a.duration_minutes
+               FROM activities a
+               JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ?
+               GROUP BY LOWER(a.description), a.context_id
+               ORDER BY MAX(a.created_at) DESC
+               LIMIT ?""",
+            (user_id, limit),
+        )
+        return await cur.fetchall()
+
+
 async def get_top_activities(user_id: int, limit: int = 10) -> List[Tuple]:
     """Returns [(description, ctx_name, color, count, total_minutes), ...] most frequent."""
     async with aiosqlite.connect(DATABASE_PATH) as db:

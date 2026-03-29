@@ -55,6 +55,36 @@ def notification_keyboard(date_str: str, hour: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def notification_quick_keyboard(
+    recent: List[Tuple], date_str: str, hour: int
+) -> InlineKeyboardMarkup:
+    """Quick-add keyboard shown inline in the notification.
+    recent: [(act_id, ctx_name, color, description, duration_minutes), ...]"""
+    builder = InlineKeyboardBuilder()
+    for act_id, ctx_name, color, desc, dur in recent:
+        short = desc[:22] + "…" if len(desc) > 22 else desc
+        builder.button(
+            text=f"{color} {short} · {_fmt_dur(dur)}",
+            callback_data=f"qk:{act_id}:{date_str}:{hour}",
+        )
+    builder.button(text="✏️ Своё дело",  callback_data=f"act_add:{date_str}:{hour}")
+    builder.button(text="⏭ Пропустить", callback_data=f"act_skip:{date_str}:{hour}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def notification_added_keyboard(
+    date_str: str, hour: int, added: List[str]
+) -> InlineKeyboardMarkup:
+    """Shown after each quick-add inside the notification.
+    added: list of human-readable strings of what was added so far."""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="➕ Ещё дело",  callback_data=f"qk_more:{date_str}:{hour}")
+    builder.button(text="✅ Готово",     callback_data=f"act_done:{date_str}:{hour}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
 def contexts_keyboard(
     contexts: List[Tuple[int, str, str]], date_str: str, hour: int
 ) -> InlineKeyboardMarkup:

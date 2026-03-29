@@ -31,9 +31,11 @@ from database import (
     get_week_comparison,
     get_top_activities, get_streak, get_hour_patterns,
     get_templates, get_template_by_id, add_template, delete_template, increment_template_use,
+    get_recent_unique_for_quick,
 )
 from keyboards import (
-    timezone_keyboard, notification_keyboard, contexts_keyboard,
+    timezone_keyboard, notification_keyboard, notification_quick_keyboard,
+    notification_added_keyboard, contexts_keyboard,
     after_activity_keyboard, stats_keyboard, schedule_keyboard,
     activities_list_keyboard, edit_menu_keyboard, delete_confirm_keyboard,
     contexts_list_keyboard, context_menu_keyboard, color_picker_keyboard,
@@ -42,7 +44,7 @@ from keyboards import (
 )
 import csv
 import io
-from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM
+from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM, NotifFSM
 
 try:
     import speech_recognition as sr
@@ -288,10 +290,98 @@ async def cb_timezone(callback: CallbackQuery, state: FSMContext):
 async def cb_act_add(callback: CallbackQuery, state: FSMContext):
     _, date_str, hour_str = callback.data.split(":")
     hour = int(hour_str)
-    await state.update_data(date_str=date_str, hour=hour)
-    await state.set_state(ActivityFSM.waiting_description)
-    await callback.message.answer(
-        f"📝 Что ты делал с {hour:02d}:00 до {hour + 1:02d}:00?\n\nОпиши занятие:"
+
+    recent = await get_recent_unique_for_quick(callback.from_user.id)
+
+    if recent:
+        # Edit the notification inline — show quick options
+        await state.set_state(NotifFSM.quick_adding)
+        await state.update_data(date_str=date_str, hour=hour, added=[])
+        await callback.message.edit_text(
+            f"⏰ <b>{hour:02d}:00–{hour + 1:02d}:00</b>  |  {date_str}\n\n"
+            "Выбери из недавних или введи своё:",
+            parse_mode="HTML",
+            reply_markup=notification_quick_keyboard(recent, date_str, hour),
+        )
+    else:
+        # No history yet — go straight to FSM
+        await state.update_data(date_str=date_str, hour=hour)
+        await state.set_state(ActivityFSM.waiting_description)
+        await callback.message.answer(
+            f"📝 Что ты делал с {hour:02d}:00 до {hour + 1:02d}:00?\n\nОпиши занятие:"
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("qk:"))
+async def cb_quick_notif_add(callback: CallbackQuery, state: FSMContext):
+    """One-tap add from notification quick menu."""
+    parts    = callback.data.split(":")
+    act_id   = int(parts[1])
+    date_str = parts[2]
+    hour     = int(parts[3])
+
+    # Fetch original activity to copy description/duration/context
+    orig = await get_activity_by_id(act_id, callback.from_user.id)
+    if not orig:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+    # orig: (id, activity_date, hour_slot, ctx_name, color, description, duration)
+    _, _, _, ctx_name, color, desc, dur = orig
+
+    # Find context_id
+    contexts = await get_user_contexts(callback.from_user.id)
+    ctx = next((c for c in contexts if c[1] == ctx_name), None)
+    if not ctx:
+        await callback.answer("Контекст не найден", show_alert=True)
+        return
+
+    await add_activity(
+        user_id=callback.from_user.id,
+        context_id=ctx[0],
+        description=desc,
+        duration_minutes=dur,
+        activity_date=date_str,
+        hour_slot=hour,
+    )
+
+    # Update state with added items
+    data  = await state.get_data()
+    added = data.get("added", [])
+    added.append(f"{color} {desc} · {fmt_dur(dur)}")
+    await state.update_data(added=added)
+
+    lines = [f"⏰ <b>{hour:02d}:00–{hour + 1:02d}:00</b>  |  {date_str}\n"]
+    lines.append("✅ <b>Добавлено:</b>")
+    for item in added:
+        lines.append(f"• {item}")
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=notification_added_keyboard(date_str, hour, added),
+    )
+    await callback.answer("✅ Записано!")
+
+
+@router.callback_query(F.data.startswith("qk_more:"))
+async def cb_qk_more(callback: CallbackQuery, state: FSMContext):
+    """Show quick options again to add another activity."""
+    _, date_str, hour_str = callback.data.split(":")
+    hour   = int(hour_str)
+    recent = await get_recent_unique_for_quick(callback.from_user.id)
+    data   = await state.get_data()
+    added  = data.get("added", [])
+
+    lines = [f"⏰ <b>{hour:02d}:00–{hour + 1:02d}:00</b>  |  {date_str}"]
+    if added:
+        lines.append("\n✅ Уже добавлено: " + "  /  ".join(added))
+    lines.append("\nЧто ещё добавить?")
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=notification_quick_keyboard(recent, date_str, hour),
     )
     await callback.answer()
 
@@ -316,8 +406,19 @@ async def cb_act_more(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("act_done:"))
 async def cb_act_done(callback: CallbackQuery, state: FSMContext):
+    data  = await state.get_data()
+    added = data.get("added", [])
     await state.clear()
-    await callback.message.edit_reply_markup(reply_markup=None)
+    if added:
+        lines = [f"⏰ <b>{callback.data.split(':')[2]}–{int(callback.data.split(':')[2][:2]) + 1:02d}:00</b>  ✅ Записано:"]
+        for item in added:
+            lines.append(f"• {item}")
+        try:
+            await callback.message.edit_text("\n".join(lines), parse_mode="HTML")
+        except Exception:
+            await callback.message.edit_reply_markup(reply_markup=None)
+    else:
+        await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer("✅ Всё записано!")
 
 
