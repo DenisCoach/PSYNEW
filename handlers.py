@@ -38,7 +38,7 @@ from keyboards import (
     activities_list_keyboard, edit_menu_keyboard, delete_confirm_keyboard,
     contexts_list_keyboard, context_menu_keyboard, color_picker_keyboard,
     ctx_delete_confirm_keyboard, goals_contexts_keyboard, export_keyboard,
-    tags_keyboard, templates_keyboard, PREDEFINED_TAGS,
+    tags_keyboard, templates_keyboard, main_menu_keyboard, PREDEFINED_TAGS,
 )
 import csv
 import io
@@ -233,6 +233,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer(
             WELCOME_TEXT + "\n\n📍 Твой часовой пояс и расписание уже настроены.",
             parse_mode="HTML",
+            reply_markup=main_menu_keyboard(),
         )
         return
     await state.set_state(Registration.choosing_timezone)
@@ -271,14 +272,13 @@ async def cb_timezone(callback: CallbackQuery, state: FSMContext):
             f"✅ Готово! Часовой пояс: {label}\n\n"
             f"Каждый час с {NOTIFY_HOURS_START - 1}:00 до {NOTIFY_HOURS_END}:00 "
             "я буду спрашивать чем ты занимался.\n\n"
-            "/stats — статистика\n"
-            "/add — добавить дело вручную\n"
-            "/help — помощь"
+            "Используй кнопки внизу экрана для навигации 👇"
         )
     else:
         text = f"✅ Часовой пояс обновлён: {label}"
 
     await callback.message.edit_text(text)
+    await callback.message.answer("👇 Меню всегда доступно:", reply_markup=main_menu_keyboard())
     await callback.answer()
 
 
@@ -991,6 +991,57 @@ async def fsm_goal_hours(message: Message, state: FSMContext):
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Отменено.")
+
+
+# ── Main menu button handlers ────────────────────────────────────────────────
+
+@router.message(F.text == "➕ Добавить")
+async def menu_add(message: Message, state: FSMContext):
+    await cmd_add(message, state)
+
+@router.message(F.text == "⚡ Быстрые")
+async def menu_quick(message: Message):
+    await cmd_quick(message)
+
+@router.message(F.text == "📊 Статистика")
+async def menu_stats(message: Message):
+    await cmd_stats(message)
+
+@router.message(F.text == "🎯 Цели")
+async def menu_goals(message: Message, state: FSMContext):
+    await cmd_goals(message, state)
+
+@router.message(F.text == "🏆 Топ")
+async def menu_top(message: Message):
+    await cmd_top(message)
+
+@router.message(F.text == "🕐 Паттерны")
+async def menu_patterns(message: Message):
+    await cmd_patterns(message)
+
+@router.message(F.text == "✏️ Редактировать")
+async def menu_edit(message: Message, state: FSMContext):
+    await cmd_edit(message, state)
+
+@router.message(F.text == "📝 Заметка")
+async def menu_note(message: Message, state: FSMContext):
+    await cmd_note(message, state)
+
+@router.message(F.text == "📤 Экспорт")
+async def menu_export(message: Message):
+    await cmd_export(message)
+
+@router.message(F.text == "🏷 Контексты")
+async def menu_contexts(message: Message, state: FSMContext):
+    await cmd_contexts(message, state)
+
+@router.message(F.text == "⏰ Расписание")
+async def menu_schedule(message: Message):
+    await cmd_schedule(message)
+
+@router.message(F.text == "⚙️ Настройки")
+async def menu_settings(message: Message, state: FSMContext):
+    await cmd_change_timezone(message, state)
 
 
 # ── Top activities ────────────────────────────────────────────────────────────

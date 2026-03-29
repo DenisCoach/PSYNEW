@@ -1,9 +1,35 @@
-from aiogram.types import InlineKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 from typing import List, Tuple
 from config import TIMEZONES
 
 MAX_CONTEXTS_SHOWN = 8
+
+
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Persistent bottom keyboard with all main commands."""
+    builder = ReplyKeyboardBuilder()
+    builder.row(
+        KeyboardButton(text="➕ Добавить"),
+        KeyboardButton(text="⚡ Быстрые"),
+        KeyboardButton(text="📊 Статистика"),
+    )
+    builder.row(
+        KeyboardButton(text="🎯 Цели"),
+        KeyboardButton(text="🏆 Топ"),
+        KeyboardButton(text="🕐 Паттерны"),
+    )
+    builder.row(
+        KeyboardButton(text="✏️ Редактировать"),
+        KeyboardButton(text="📝 Заметка"),
+        KeyboardButton(text="📤 Экспорт"),
+    )
+    builder.row(
+        KeyboardButton(text="🏷 Контексты"),
+        KeyboardButton(text="⏰ Расписание"),
+        KeyboardButton(text="⚙️ Настройки"),
+    )
+    return builder.as_markup(resize_keyboard=True, persistent=True)
 
 
 def _fmt_dur(minutes: int) -> str:
