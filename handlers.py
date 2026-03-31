@@ -35,6 +35,8 @@ from database import (
     ensure_default_habits, get_habits, get_habit_by_id, add_habit, delete_habit,
     get_habit_logs_today, log_habit, delete_habit_log,
     create_snapshot, get_snapshots, restore_snapshot, delete_snapshot, reset_user_data,
+    get_places, add_place, delete_place, set_activity_place, get_activity_place,
+    get_people, add_person, delete_person, set_activity_people, get_activity_people,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, notification_quick_keyboard,
@@ -48,11 +50,14 @@ from keyboards import (
     habits_keyboard, habit_action_keyboard, habits_manage_keyboard,
     duration_keyboard, settings_keyboard, snapshots_keyboard,
     snapshot_actions_keyboard, snap_restore_confirm_keyboard,
-    reset_confirm_keyboard, PREDEFINED_TAGS,
+    reset_confirm_keyboard,
+    place_picker_keyboard, people_picker_keyboard,
+    places_list_keyboard, people_list_keyboard,
+    PREDEFINED_TAGS,
 )
 import csv
 import io
-from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM, NotifFSM, HabitFSM, SnapshotFSM
+from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM, NotifFSM, HabitFSM, SnapshotFSM, PlaceFSM, PersonFSM, PeoplePickFSM
 
 try:
     import speech_recognition as sr
@@ -667,7 +672,7 @@ async def cb_tag_save(callback: CallbackQuery, state: FSMContext):
     tag_text = "  ".join(f"#{t}" for t in tags) if tags else "без тегов"
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.message.answer(
-        f"🏷 {tag_text}",
+        f"🏷 {tag_text}\n\n📍 Где это было? Кто был рядом? (опционально)",
         reply_markup=after_activity_keyboard(data["date_str"], data["hour"], act_id),
     )
     await callback.answer()
@@ -1478,6 +1483,301 @@ async def cb_hb_remove(callback: CallbackQuery):
     await callback.answer("Скрыто")
 
 
+# ── Places & People — activity attachment ────────────────────────────────────
+
+async def _after_kb(act_id: int, date_str: str, hour: int, user_id: int) -> InlineKeyboardMarkup:
+    """Build after_activity_keyboard with current place/people state."""
+    place = await get_activity_place(act_id)
+    people = await get_activity_people(act_id)
+    place_name   = f"{place[2]} {place[1]}" if place else None
+    people_names = [p[1] for p in people] if people else None
+    return after_activity_keyboard(date_str, hour, act_id, place_name, people_names)
+
+
+@router.callback_query(F.data.startswith("ap_place:"))
+async def cb_ap_place(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    places = await get_places(callback.from_user.id)
+    if not places:
+        await state.set_state(PlaceFSM.waiting_name)
+        await state.update_data(act_id=act_id, from_activity=True)
+        await callback.message.answer(
+            "📍 У тебя пока нет мест. Введи название первого:\n<i>Дом, Офис, Кафе...</i>",
+            parse_mode="HTML",
+        )
+    else:
+        await callback.message.answer(
+            "📍 Выбери место:",
+            reply_markup=place_picker_keyboard(places, act_id),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap_setplace:"))
+async def cb_ap_setplace(callback: CallbackQuery, state: FSMContext):
+    parts    = callback.data.split(":")
+    act_id   = int(parts[1])
+    place_id = int(parts[2])
+    await set_activity_place(act_id, callback.from_user.id, place_id)
+    data = await state.get_data()
+    date_str = data.get("date_str", "")
+    hour     = data.get("hour", 0)
+    place    = await get_activity_place(act_id)
+    place_name = f"{place[2]} {place[1]}" if place else None
+    people     = await get_activity_people(act_id)
+    people_names = [p[1] for p in people] if people else None
+    await callback.message.edit_text(
+        f"📍 Место: <b>{place_name}</b>",
+        parse_mode="HTML",
+        reply_markup=after_activity_keyboard(date_str, hour, act_id, place_name, people_names),
+    )
+    await callback.answer("✅ Место сохранено")
+
+
+@router.callback_query(F.data.startswith("ap_newplace:"))
+async def cb_ap_newplace(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    await state.set_state(PlaceFSM.waiting_name)
+    await state.update_data(act_id=act_id, from_activity=True)
+    await callback.message.edit_text(
+        "📍 Введи название нового места:\n<i>Дом, Офис, Кафе, Спортзал...</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap_person:"))
+async def cb_ap_person(callback: CallbackQuery, state: FSMContext):
+    act_id  = int(callback.data.split(":")[1])
+    people  = await get_people(callback.from_user.id)
+    current = await get_activity_people(act_id)
+    selected = [p[0] for p in current]
+    if not people:
+        await state.set_state(PersonFSM.waiting_name)
+        await state.update_data(act_id=act_id, from_activity=True)
+        await callback.message.answer(
+            "👤 У тебя пока нет людей. Введи имя первого:\n<i>Маша, Коллега Вася...</i>",
+            parse_mode="HTML",
+        )
+    else:
+        await state.set_state(PeoplePickFSM.selecting)
+        await state.update_data(act_id=act_id, selected_people=selected)
+        await callback.message.answer(
+            "👥 Кто был рядом? (можно выбрать нескольких)",
+            reply_markup=people_picker_keyboard(people, act_id, selected),
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap_tp:"), PeoplePickFSM.selecting)
+async def cb_ap_toggle_person(callback: CallbackQuery, state: FSMContext):
+    parts     = callback.data.split(":")
+    act_id    = int(parts[1])
+    person_id = int(parts[2])
+    data      = await state.get_data()
+    selected  = data.get("selected_people", [])
+    selected  = [p for p in selected if p != person_id] if person_id in selected else selected + [person_id]
+    await state.update_data(selected_people=selected)
+    people = await get_people(callback.from_user.id)
+    await callback.message.edit_reply_markup(
+        reply_markup=people_picker_keyboard(people, act_id, selected)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap_sp:"), PeoplePickFSM.selecting)
+async def cb_ap_save_people(callback: CallbackQuery, state: FSMContext):
+    act_id   = int(callback.data.split(":")[1])
+    data     = await state.get_data()
+    selected = data.get("selected_people", [])
+    await set_activity_people(act_id, selected)
+    await state.clear()
+    date_str = data.get("date_str", "")
+    hour     = data.get("hour", 0)
+    place    = await get_activity_place(act_id)
+    people   = await get_activity_people(act_id)
+    place_name   = f"{place[2]} {place[1]}" if place else None
+    people_names = [p[1] for p in people] if people else None
+    names_str    = ", ".join(people_names) if people_names else ""
+    await callback.message.edit_text(
+        f"👥 Люди: <b>{names_str}</b>",
+        parse_mode="HTML",
+        reply_markup=after_activity_keyboard(date_str, hour, act_id, place_name, people_names),
+    )
+    await callback.answer("✅ Сохранено")
+
+
+@router.callback_query(F.data.startswith("ap_np:"))
+async def cb_ap_new_person(callback: CallbackQuery, state: FSMContext):
+    act_id = int(callback.data.split(":")[1])
+    await state.set_state(PersonFSM.waiting_name)
+    await state.update_data(act_id=act_id, from_activity=True)
+    await callback.message.edit_text(
+        "👤 Введи имя нового человека:",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ap_back:"))
+async def cb_ap_back(callback: CallbackQuery, state: FSMContext):
+    """Skip place/people — go back to after-activity menu."""
+    act_id = int(callback.data.split(":")[1])
+    data   = await state.get_data()
+    await state.clear()
+    date_str = data.get("date_str", "")
+    hour     = data.get("hour", 0)
+    kb = await _after_kb(act_id, date_str, hour, callback.from_user.id)
+    await callback.message.edit_reply_markup(reply_markup=kb)
+    await callback.answer()
+
+
+# ── Places FSM (new place from activity or /places) ───────────────────────────
+
+@router.message(PlaceFSM.waiting_name)
+async def fsm_place_name(message: Message, state: FSMContext):
+    name = message.text.strip()[:40]
+    await state.update_data(place_name=name)
+    await state.set_state(PlaceFSM.waiting_emoji)
+    await message.answer(
+        f"Отлично! Выбери эмодзи для <b>{name}</b>\n\n"
+        "Отправь любой эмодзи, например: 🏠 🏢 ☕ 🏋️ 🏫 🌳",
+        parse_mode="HTML",
+    )
+
+
+@router.message(PlaceFSM.waiting_emoji)
+async def fsm_place_emoji(message: Message, state: FSMContext):
+    emoji  = message.text.strip()
+    data   = await state.get_data()
+    place_id = await add_place(message.from_user.id, data["place_name"], emoji)
+    act_id = data.get("act_id")
+    if act_id:
+        await set_activity_place(act_id, message.from_user.id, place_id)
+        await state.clear()
+        place_name = f"{emoji} {data['place_name']}"
+        people     = await get_activity_people(act_id)
+        people_names = [p[1] for p in people] if people else None
+        date_str   = data.get("date_str", "")
+        hour       = data.get("hour", 0)
+        await message.answer(
+            f"✅ Место <b>{place_name}</b> создано и сохранено!",
+            parse_mode="HTML",
+            reply_markup=after_activity_keyboard(date_str, hour, act_id, place_name, people_names),
+        )
+    else:
+        await state.clear()
+        await message.answer(
+            f"✅ Место {emoji} <b>{data['place_name']}</b> добавлено!",
+            parse_mode="HTML",
+            reply_markup=places_list_keyboard(await get_places(message.from_user.id)),
+        )
+
+
+# ── People FSM (new person from activity or /people) ──────────────────────────
+
+@router.message(PersonFSM.waiting_name)
+async def fsm_person_name(message: Message, state: FSMContext):
+    name      = message.text.strip()[:40]
+    person_id = await add_person(message.from_user.id, name)
+    data      = await state.get_data()
+    act_id    = data.get("act_id")
+    await state.clear()
+    if act_id:
+        people   = await get_people(message.from_user.id)
+        current  = await get_activity_people(act_id)
+        selected = [p[0] for p in current] + [person_id]
+        await set_activity_people(act_id, selected)
+        date_str = data.get("date_str", "")
+        hour     = data.get("hour", 0)
+        place    = await get_activity_place(act_id)
+        all_people = await get_activity_people(act_id)
+        place_name   = f"{place[2]} {place[1]}" if place else None
+        people_names = [p[1] for p in all_people]
+        await message.answer(
+            f"✅ <b>{name}</b> добавлен и отмечен!",
+            parse_mode="HTML",
+            reply_markup=after_activity_keyboard(date_str, hour, act_id, place_name, people_names),
+        )
+    else:
+        await message.answer(
+            f"✅ <b>{name}</b> добавлен в список!",
+            parse_mode="HTML",
+            reply_markup=people_list_keyboard(await get_people(message.from_user.id)),
+        )
+
+
+# ── /places — management ──────────────────────────────────────────────────────
+
+@router.message(Command("places"))
+async def cmd_places(message: Message, state: FSMContext):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    await state.clear()
+    places = await get_places(message.from_user.id)
+    text = "📍 <b>Твои места:</b>" if places else "📍 <b>Мест пока нет.</b>\n\nДобавь первое:"
+    await message.answer(text, parse_mode="HTML", reply_markup=places_list_keyboard(places))
+
+
+@router.callback_query(F.data == "pl_add")
+async def cb_pl_add(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(PlaceFSM.waiting_name)
+    await state.update_data(act_id=None, from_activity=False)
+    await callback.message.edit_text(
+        "📍 Введи название нового места:\n<i>Дом, Офис, Кафе...</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pl_del:"))
+async def cb_pl_del(callback: CallbackQuery):
+    place_id = int(callback.data.split(":")[1])
+    await delete_place(place_id, callback.from_user.id)
+    places = await get_places(callback.from_user.id)
+    text   = "📍 <b>Твои места:</b>" if places else "📍 <b>Мест пока нет.</b>"
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=places_list_keyboard(places),
+    )
+    await callback.answer("🗑 Удалено")
+
+
+# ── /people — management ──────────────────────────────────────────────────────
+
+@router.message(Command("people"))
+async def cmd_people(message: Message, state: FSMContext):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    await state.clear()
+    people = await get_people(message.from_user.id)
+    text = "👥 <b>Твои люди:</b>" if people else "👥 <b>Людей пока нет.</b>\n\nДобавь первого:"
+    await message.answer(text, parse_mode="HTML", reply_markup=people_list_keyboard(people))
+
+
+@router.callback_query(F.data == "pp_add")
+async def cb_pp_add(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(PersonFSM.waiting_name)
+    await state.update_data(act_id=None)
+    await callback.message.edit_text("👤 Введи имя:")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pp_del:"))
+async def cb_pp_del(callback: CallbackQuery):
+    person_id = int(callback.data.split(":")[1])
+    await delete_person(person_id, callback.from_user.id)
+    people = await get_people(callback.from_user.id)
+    text   = "👥 <b>Твои люди:</b>" if people else "👥 <b>Людей пока нет.</b>"
+    await callback.message.edit_text(
+        text, parse_mode="HTML",
+        reply_markup=people_list_keyboard(people),
+    )
+    await callback.answer("🗑 Удалено")
+
+
 # ── Main menu button handlers ────────────────────────────────────────────────
 
 @router.message(F.text == "➕ Добавить")
@@ -1519,6 +1819,14 @@ async def menu_export(message: Message):
 @router.message(F.text == "🗓 Привычки")
 async def menu_habits(message: Message, state: FSMContext):
     await cmd_habits(message, state)
+
+@router.message(F.text == "📍 Места")
+async def menu_places(message: Message, state: FSMContext):
+    await cmd_places(message, state)
+
+@router.message(F.text == "👥 Люди")
+async def menu_people(message: Message, state: FSMContext):
+    await cmd_people(message, state)
 
 @router.message(F.text == "🏷 Контексты")
 async def menu_contexts(message: Message, state: FSMContext):

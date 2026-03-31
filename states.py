@@ -36,6 +36,19 @@ class NotifFSM(StatesGroup):
     quick_adding = State()
 
 
+class PlaceFSM(StatesGroup):
+    waiting_name  = State()
+    waiting_emoji = State()
+
+
+class PersonFSM(StatesGroup):
+    waiting_name = State()
+
+
+class PeoplePickFSM(StatesGroup):
+    selecting = State()
+
+
 class SnapshotFSM(StatesGroup):
     waiting_name = State()
     waiting_reset_name = State()

@@ -66,6 +66,31 @@ async def init_db():
                 FOREIGN KEY (context_id) REFERENCES contexts(id)
             );
 
+            CREATE TABLE IF NOT EXISTS places (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                name       TEXT    NOT NULL,
+                emoji      TEXT    NOT NULL DEFAULT '📍',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS people (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                name       TEXT    NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS activity_people (
+                activity_id INTEGER NOT NULL,
+                person_id   INTEGER NOT NULL,
+                PRIMARY KEY (activity_id, person_id),
+                FOREIGN KEY (activity_id) REFERENCES activities(id),
+                FOREIGN KEY (person_id)   REFERENCES people(id)
+            );
+
             CREATE TABLE IF NOT EXISTS snapshots (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id    INTEGER NOT NULL,
@@ -116,6 +141,19 @@ async def init_db():
         for sql in [
             "ALTER TABLE users ADD COLUMN notification_hours TEXT NOT NULL DEFAULT '10,11,12,13,14,15,16,17,18,19,20,21'",
             "ALTER TABLE activities ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE activities ADD COLUMN place_id INTEGER",
+            """CREATE TABLE IF NOT EXISTS places (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL, name TEXT NOT NULL,
+                emoji TEXT NOT NULL DEFAULT '📍',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS people (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL, name TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS activity_people (
+                activity_id INTEGER NOT NULL, person_id INTEGER NOT NULL,
+                PRIMARY KEY (activity_id, person_id))""",
             """CREATE TABLE IF NOT EXISTS snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -896,6 +934,114 @@ async def delete_habit_log(user_id: int, habit_id: int, log_date: str):
             (user_id, habit_id, log_date),
         )
         await db.commit()
+
+
+# ── Places ───────────────────────────────────────────────────────────────────
+
+async def get_places(user_id: int) -> List[Tuple]:
+    """Returns [(id, name, emoji), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, name, emoji FROM places WHERE user_id = ? ORDER BY name",
+            (user_id,),
+        )
+        return await cur.fetchall()
+
+
+async def add_place(user_id: int, name: str, emoji: str = "📍") -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO places (user_id, name, emoji) VALUES (?,?,?)",
+            (user_id, name.strip(), emoji),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def delete_place(place_id: int, user_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE activities SET place_id = NULL WHERE place_id = ? AND user_id = ?",
+            (place_id, user_id),
+        )
+        await db.execute("DELETE FROM places WHERE id = ? AND user_id = ?", (place_id, user_id))
+        await db.commit()
+
+
+async def set_activity_place(activity_id: int, user_id: int, place_id: Optional[int]):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE activities SET place_id = ? WHERE id = ? AND user_id = ?",
+            (place_id, activity_id, user_id),
+        )
+        await db.commit()
+
+
+async def get_activity_place(activity_id: int) -> Optional[Tuple]:
+    """Returns (place_id, name, emoji) or None."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT p.id, p.name, p.emoji FROM activities a
+               JOIN places p ON a.place_id = p.id
+               WHERE a.id = ?""",
+            (activity_id,),
+        )
+        return await cur.fetchone()
+
+
+# ── People ────────────────────────────────────────────────────────────────────
+
+async def get_people(user_id: int) -> List[Tuple]:
+    """Returns [(id, name), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, name FROM people WHERE user_id = ? ORDER BY name",
+            (user_id,),
+        )
+        return await cur.fetchall()
+
+
+async def add_person(user_id: int, name: str) -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO people (user_id, name) VALUES (?,?)",
+            (user_id, name.strip()),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def delete_person(person_id: int, user_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM activity_people WHERE person_id = ?", (person_id,)
+        )
+        await db.execute("DELETE FROM people WHERE id = ? AND user_id = ?", (person_id, user_id))
+        await db.commit()
+
+
+async def set_activity_people(activity_id: int, person_ids: List[int]):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("DELETE FROM activity_people WHERE activity_id = ?", (activity_id,))
+        for pid in person_ids:
+            await db.execute(
+                "INSERT OR IGNORE INTO activity_people (activity_id, person_id) VALUES (?,?)",
+                (activity_id, pid),
+            )
+        await db.commit()
+
+
+async def get_activity_people(activity_id: int) -> List[Tuple]:
+    """Returns [(person_id, name), ...]"""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT p.id, p.name FROM activity_people ap
+               JOIN people p ON ap.person_id = p.id
+               WHERE ap.activity_id = ?
+               ORDER BY p.name""",
+            (activity_id,),
+        )
+        return await cur.fetchall()
 
 
 # ── Snapshots ────────────────────────────────────────────────────────────────

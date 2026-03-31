@@ -26,10 +26,12 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     )
     builder.row(
         KeyboardButton(text="🗓 Привычки"),
-        KeyboardButton(text="🏷 Контексты"),
-        KeyboardButton(text="⏰ Расписание"),
+        KeyboardButton(text="📍 Места"),
+        KeyboardButton(text="👥 Люди"),
     )
     builder.row(
+        KeyboardButton(text="🏷 Контексты"),
+        KeyboardButton(text="⏰ Расписание"),
         KeyboardButton(text="⚙️ Настройки"),
     )
     return builder.as_markup(resize_keyboard=True, persistent=True)
@@ -114,13 +116,29 @@ def contexts_keyboard(
     return builder.as_markup()
 
 
-def after_activity_keyboard(date_str: str, hour: int, act_id: int = 0) -> InlineKeyboardMarkup:
+def after_activity_keyboard(
+    date_str: str, hour: int, act_id: int = 0,
+    place_name: str = None, people_names: List[str] = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
+    rows = []
+    if act_id:
+        place_label  = f"📍 {place_name} ✓" if place_name else "📍 Место"
+        if people_names:
+            short = ", ".join(people_names[:2]) + ("…" if len(people_names) > 2 else "")
+            people_label = f"👥 {short} ✓"
+        else:
+            people_label = "👥 Люди"
+        builder.button(text=place_label,  callback_data=f"ap_place:{act_id}")
+        builder.button(text=people_label, callback_data=f"ap_person:{act_id}")
+        rows.append(2)
     builder.button(text="➕ Добавить ещё", callback_data=f"act_more:{date_str}:{hour}")
     builder.button(text="✅ Готово",        callback_data=f"act_done:{date_str}:{hour}")
+    rows.append(2)
     if act_id:
-        builder.button(text="💾 Шаблон",   callback_data=f"act_tmpl:{act_id}")
-    builder.adjust(2)
+        builder.button(text="💾 Шаблон", callback_data=f"act_tmpl:{act_id}")
+        rows.append(1)
+    builder.adjust(*rows)
     return builder.as_markup()
 
 
@@ -171,6 +189,55 @@ def goals_contexts_keyboard(contexts: List[Tuple], goals: dict) -> InlineKeyboar
         suffix = f" → {target}ч/нед" if target else ""
         builder.button(text=f"{color} {name}{suffix}", callback_data=f"gl:{ctx_id}")
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def place_picker_keyboard(places: List[Tuple], act_id: int) -> InlineKeyboardMarkup:
+    """places: [(id, name, emoji), ...]"""
+    builder = InlineKeyboardBuilder()
+    for place_id, name, emoji in places:
+        builder.button(text=f"{emoji} {name}", callback_data=f"ap_setplace:{act_id}:{place_id}")
+    builder.button(text="➕ Новое место",  callback_data=f"ap_newplace:{act_id}")
+    builder.button(text="⏭ Пропустить",   callback_data=f"ap_back:{act_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def people_picker_keyboard(people: List[Tuple], act_id: int, selected: List[int]) -> InlineKeyboardMarkup:
+    """people: [(id, name), ...]"""
+    builder = InlineKeyboardBuilder()
+    for person_id, name in people:
+        prefix = "✅" if person_id in selected else "○"
+        builder.button(text=f"{prefix} {name}", callback_data=f"ap_tp:{act_id}:{person_id}")
+    builder.button(text="➕ Новый человек", callback_data=f"ap_np:{act_id}")
+    if selected:
+        builder.button(text="💾 Сохранить",  callback_data=f"ap_sp:{act_id}")
+    builder.button(text="⏭ Пропустить",     callback_data=f"ap_back:{act_id}")
+    n = len(people)
+    tail = [1, 1, 1] if selected else [1, 1]
+    builder.adjust(*([1] * n + tail))
+    return builder.as_markup()
+
+
+def places_list_keyboard(places: List[Tuple]) -> InlineKeyboardMarkup:
+    """Management screen. places: [(id, name, emoji), ...]"""
+    builder = InlineKeyboardBuilder()
+    for place_id, name, emoji in places:
+        builder.button(text=f"{emoji} {name}", callback_data=f"pl:{place_id}")
+        builder.button(text="🗑",              callback_data=f"pl_del:{place_id}")
+    builder.button(text="➕ Добавить место", callback_data="pl_add")
+    builder.adjust(*([2] * len(places) + [1]))
+    return builder.as_markup()
+
+
+def people_list_keyboard(people: List[Tuple]) -> InlineKeyboardMarkup:
+    """Management screen. people: [(id, name), ...]"""
+    builder = InlineKeyboardBuilder()
+    for person_id, name in people:
+        builder.button(text=f"👤 {name}", callback_data=f"pp:{person_id}")
+        builder.button(text="🗑",         callback_data=f"pp_del:{person_id}")
+    builder.button(text="➕ Добавить человека", callback_data="pp_add")
+    builder.adjust(*([2] * len(people) + [1]))
     return builder.as_markup()
 
 
