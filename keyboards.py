@@ -219,6 +219,55 @@ def habits_manage_keyboard(habits: List[Tuple]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def settings_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🌍 Часовой пояс",    callback_data="set_tz")
+    builder.button(text="📸 Сохранить снапшот", callback_data="set_snap")
+    builder.button(text="📂 Мои снапшоты",    callback_data="set_snaps_list")
+    builder.button(text="🔄 Начать сначала",  callback_data="set_reset")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def snapshots_keyboard(snapshots: List[Tuple]) -> InlineKeyboardMarkup:
+    """snapshots: [(id, name, date, act_count), ...]"""
+    builder = InlineKeyboardBuilder()
+    for snap_id, name, date, cnt in snapshots:
+        builder.button(
+            text=f"📸 {name}  ({date}, {cnt} записей)",
+            callback_data=f"snap_view:{snap_id}",
+        )
+    builder.button(text="◀️ Назад", callback_data="set_back")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def snapshot_actions_keyboard(snap_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="♻️ Восстановить",  callback_data=f"snap_restore:{snap_id}")
+    builder.button(text="🗑 Удалить",       callback_data=f"snap_del:{snap_id}")
+    builder.button(text="◀️ Назад",         callback_data="set_snaps_list")
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+
+def snap_restore_confirm_keyboard(snap_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✅ Да, восстановить", callback_data=f"snap_restore_ok:{snap_id}")
+    builder.button(text="❌ Отмена",           callback_data=f"snap_view:{snap_id}")
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+def reset_confirm_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📸 Сохранить и начать сначала", callback_data="reset_with_snap")
+    builder.button(text="🗑 Начать сначала без сохранения", callback_data="reset_no_snap")
+    builder.button(text="❌ Отмена",                      callback_data="set_back")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def export_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📅 Неделя",  callback_data="exp:week")

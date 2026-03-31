@@ -34,6 +34,7 @@ from database import (
     get_recent_unique_for_quick,
     ensure_default_habits, get_habits, get_habit_by_id, add_habit, delete_habit,
     get_habit_logs_today, log_habit, delete_habit_log,
+    create_snapshot, get_snapshots, restore_snapshot, delete_snapshot, reset_user_data,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, notification_quick_keyboard,
@@ -45,11 +46,13 @@ from keyboards import (
     tags_keyboard, templates_keyboard, main_menu_keyboard,
     hour_picker_keyboard, hour_picker_day_keyboard,
     habits_keyboard, habit_action_keyboard, habits_manage_keyboard,
-    duration_keyboard, PREDEFINED_TAGS,
+    duration_keyboard, settings_keyboard, snapshots_keyboard,
+    snapshot_actions_keyboard, snap_restore_confirm_keyboard,
+    reset_confirm_keyboard, PREDEFINED_TAGS,
 )
 import csv
 import io
-from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM, NotifFSM, HabitFSM
+from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM, NotifFSM, HabitFSM, SnapshotFSM
 
 try:
     import speech_recognition as sr
@@ -1504,7 +1507,188 @@ async def menu_schedule(message: Message):
 
 @router.message(F.text == "⚙️ Настройки")
 async def menu_settings(message: Message, state: FSMContext):
-    await cmd_change_timezone(message, state)
+    await state.clear()
+    await message.answer(
+        "⚙️ <b>Настройки</b>",
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(),
+    )
+
+@router.callback_query(F.data == "set_tz")
+async def cb_set_tz(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(Registration.choosing_timezone)
+    await callback.message.edit_text(
+        "🌍 Выбери часовой пояс:",
+        reply_markup=timezone_keyboard(),
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "set_back")
+async def cb_set_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "⚙️ <b>Настройки</b>",
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(),
+    )
+    await callback.answer()
+
+# ── Snapshots ─────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "set_snap")
+async def cb_set_snap(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SnapshotFSM.waiting_name)
+    await callback.message.edit_text(
+        "📸 <b>Сохранить снапшот</b>\n\n"
+        "Введи название снапшота, например:\n"
+        "<i>Март 2026</i>  или  <i>Перед перезапуском</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.message(SnapshotFSM.waiting_name)
+async def fsm_snapshot_name(message: Message, state: FSMContext):
+    name = message.text.strip()[:50]
+    snap_id = await create_snapshot(message.from_user.id, name)
+    await state.clear()
+    await message.answer(
+        f"✅ Снапшот <b>«{name}»</b> сохранён!\n\n"
+        "Найти его можно в ⚙️ Настройки → 📂 Мои снапшоты.",
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(),
+    )
+
+@router.callback_query(F.data == "set_snaps_list")
+async def cb_snaps_list(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    snaps = await get_snapshots(callback.from_user.id)
+    if not snaps:
+        await callback.message.edit_text(
+            "📂 Снапшотов пока нет.\n\nСохрани первый через 📸 Сохранить снапшот.",
+            reply_markup=settings_keyboard(),
+        )
+    else:
+        await callback.message.edit_text(
+            "📂 <b>Мои снапшоты</b>\n\nВыбери снапшот:",
+            parse_mode="HTML",
+            reply_markup=snapshots_keyboard(snaps),
+        )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("snap_view:"))
+async def cb_snap_view(callback: CallbackQuery):
+    snap_id = int(callback.data.split(":")[1])
+    snaps   = await get_snapshots(callback.from_user.id)
+    snap    = next((s for s in snaps if s[0] == snap_id), None)
+    if not snap:
+        await callback.answer("Снапшот не найден", show_alert=True)
+        return
+    _, name, date, cnt = snap
+    await callback.message.edit_text(
+        f"📸 <b>{name}</b>\n\n"
+        f"📅 Дата: {date}\n"
+        f"📝 Записей: {cnt}\n\n"
+        "Что хочешь сделать?",
+        parse_mode="HTML",
+        reply_markup=snapshot_actions_keyboard(snap_id),
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("snap_restore:"))
+async def cb_snap_restore(callback: CallbackQuery):
+    snap_id = int(callback.data.split(":")[1])
+    snaps   = await get_snapshots(callback.from_user.id)
+    snap    = next((s for s in snaps if s[0] == snap_id), None)
+    name    = snap[1] if snap else "?"
+    await callback.message.edit_text(
+        f"♻️ <b>Восстановить снапшот «{name}»?</b>\n\n"
+        "⚠️ Все текущие данные будут заменены данными из снапшота.\n"
+        "Текущие данные не сохранятся — сохрани их сначала если нужно.",
+        parse_mode="HTML",
+        reply_markup=snap_restore_confirm_keyboard(snap_id),
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("snap_restore_ok:"))
+async def cb_snap_restore_ok(callback: CallbackQuery):
+    snap_id = int(callback.data.split(":")[1])
+    ok = await restore_snapshot(callback.from_user.id, snap_id)
+    if ok:
+        await callback.message.edit_text(
+            "✅ <b>Снапшот восстановлен!</b>\n\n"
+            "Все данные возвращены к сохранённому состоянию.",
+            parse_mode="HTML",
+            reply_markup=settings_keyboard(),
+        )
+    else:
+        await callback.answer("Снапшот не найден", show_alert=True)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("snap_del:"))
+async def cb_snap_del(callback: CallbackQuery):
+    snap_id = int(callback.data.split(":")[1])
+    await delete_snapshot(callback.from_user.id, snap_id)
+    snaps = await get_snapshots(callback.from_user.id)
+    if snaps:
+        await callback.message.edit_text(
+            "🗑 Удалено.\n\n📂 <b>Мои снапшоты:</b>",
+            parse_mode="HTML",
+            reply_markup=snapshots_keyboard(snaps),
+        )
+    else:
+        await callback.message.edit_text(
+            "🗑 Удалено. Снапшотов больше нет.",
+            reply_markup=settings_keyboard(),
+        )
+    await callback.answer()
+
+# ── Reset ─────────────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "set_reset")
+async def cb_set_reset(callback: CallbackQuery):
+    await callback.message.edit_text(
+        "🔄 <b>Начать сначала</b>\n\n"
+        "Все текущие записи, контексты, цели и привычки будут удалены.\n\n"
+        "Рекомендуем сначала сохранить снапшот — потом сможешь восстановить данные.",
+        parse_mode="HTML",
+        reply_markup=reset_confirm_keyboard(),
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "reset_with_snap")
+async def cb_reset_with_snap(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SnapshotFSM.waiting_reset_name)
+    await callback.message.edit_text(
+        "📸 Введи название снапшота перед сбросом:\n"
+        "<i>Например: До сброса март 2026</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+@router.message(SnapshotFSM.waiting_reset_name)
+async def fsm_reset_with_snap(message: Message, state: FSMContext):
+    name = message.text.strip()[:50]
+    await create_snapshot(message.from_user.id, name)
+    await reset_user_data(message.from_user.id)
+    await state.clear()
+    await message.answer(
+        f"✅ Снапшот <b>«{name}»</b> сохранён.\n\n"
+        "🔄 Данные очищены. Можешь начинать заново!\n\n"
+        "Восстановить данные: ⚙️ Настройки → 📂 Мои снапшоты",
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(),
+    )
+
+@router.callback_query(F.data == "reset_no_snap")
+async def cb_reset_no_snap(callback: CallbackQuery, state: FSMContext):
+    await reset_user_data(callback.from_user.id)
+    await state.clear()
+    await callback.message.edit_text(
+        "🔄 <b>Данные очищены.</b>\n\nМожешь начинать заново!",
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(),
+    )
+    await callback.answer()
 
 
 # ── Top activities ────────────────────────────────────────────────────────────

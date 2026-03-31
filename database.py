@@ -66,6 +66,15 @@ async def init_db():
                 FOREIGN KEY (context_id) REFERENCES contexts(id)
             );
 
+            CREATE TABLE IF NOT EXISTS snapshots (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                name       TEXT    NOT NULL,
+                data       TEXT    NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
             CREATE TABLE IF NOT EXISTS habits (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id    INTEGER NOT NULL,
@@ -107,6 +116,13 @@ async def init_db():
         for sql in [
             "ALTER TABLE users ADD COLUMN notification_hours TEXT NOT NULL DEFAULT '10,11,12,13,14,15,16,17,18,19,20,21'",
             "ALTER TABLE activities ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+            """CREATE TABLE IF NOT EXISTS snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
             """CREATE TABLE IF NOT EXISTS habits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -879,6 +895,217 @@ async def delete_habit_log(user_id: int, habit_id: int, log_date: str):
             "DELETE FROM habit_logs WHERE user_id = ? AND habit_id = ? AND log_date = ?",
             (user_id, habit_id, log_date),
         )
+        await db.commit()
+
+
+# ── Snapshots ────────────────────────────────────────────────────────────────
+
+async def create_snapshot(user_id: int, name: str) -> int:
+    """Collects all user data into JSON and saves as snapshot. Returns snapshot id."""
+    import json
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        data = {}
+
+        cur = await db.execute(
+            "SELECT username, timezone, notification_hours FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        row = await cur.fetchone()
+        data["user"] = {"username": row[0], "timezone": row[1], "notification_hours": row[2]}
+
+        cur = await db.execute(
+            "SELECT name, color FROM contexts WHERE user_id = ?", (user_id,)
+        )
+        data["contexts"] = [{"name": r[0], "color": r[1]} for r in await cur.fetchall()]
+
+        cur = await db.execute(
+            """SELECT a.activity_date, a.hour_slot, a.description, a.duration_minutes,
+                      a.tags, c.name as ctx_name
+               FROM activities a JOIN contexts c ON a.context_id = c.id
+               WHERE a.user_id = ?""",
+            (user_id,)
+        )
+        data["activities"] = [
+            {"date": r[0], "hour": r[1], "desc": r[2], "dur": r[3], "tags": r[4], "ctx": r[5]}
+            for r in await cur.fetchall()
+        ]
+
+        cur = await db.execute(
+            """SELECT c.name, g.weekly_hours FROM goals g
+               JOIN contexts c ON g.context_id = c.id WHERE g.user_id = ?""",
+            (user_id,)
+        )
+        data["goals"] = [{"ctx": r[0], "hours": r[1]} for r in await cur.fetchall()]
+
+        cur = await db.execute(
+            "SELECT note_date, text FROM day_notes WHERE user_id = ?", (user_id,)
+        )
+        data["day_notes"] = [{"date": r[0], "text": r[1]} for r in await cur.fetchall()]
+
+        cur = await db.execute(
+            """SELECT c.name, c.color, t.description, t.duration_minutes FROM templates t
+               JOIN contexts c ON t.context_id = c.id WHERE t.user_id = ?""",
+            (user_id,)
+        )
+        data["templates"] = [
+            {"ctx": r[0], "color": r[1], "desc": r[2], "dur": r[3]}
+            for r in await cur.fetchall()
+        ]
+
+        cur = await db.execute(
+            "SELECT name, habit_type, emoji, sort_order FROM habits WHERE user_id = ? AND is_active=1",
+            (user_id,)
+        )
+        data["habits"] = [
+            {"name": r[0], "type": r[1], "emoji": r[2], "sort": r[3]}
+            for r in await cur.fetchall()
+        ]
+
+        cur = await db.execute(
+            """SELECT h.name, hl.log_date, hl.time_start, hl.time_end, hl.text_value
+               FROM habit_logs hl JOIN habits h ON hl.habit_id = h.id
+               WHERE hl.user_id = ?""",
+            (user_id,)
+        )
+        data["habit_logs"] = [
+            {"habit": r[0], "date": r[1], "start": r[2], "end": r[3], "val": r[4]}
+            for r in await cur.fetchall()
+        ]
+
+        cur = await db.execute(
+            "INSERT INTO snapshots (user_id, name, data) VALUES (?, ?, ?)",
+            (user_id, name, json.dumps(data, ensure_ascii=False))
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_snapshots(user_id: int) -> List[Tuple]:
+    """Returns [(id, name, created_at, activity_count), ...]"""
+    import json
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, name, data, created_at FROM snapshots WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        )
+        rows = await cur.fetchall()
+    result = []
+    for snap_id, name, data_json, created_at in rows:
+        data = json.loads(data_json)
+        act_count = len(data.get("activities", []))
+        result.append((snap_id, name, created_at[:10], act_count))
+    return result
+
+
+async def restore_snapshot(user_id: int, snapshot_id: int):
+    """Clears current user data and restores from snapshot."""
+    import json
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT data FROM snapshots WHERE id = ? AND user_id = ?",
+            (snapshot_id, user_id)
+        )
+        row = await cur.fetchone()
+        if not row:
+            return False
+        data = json.loads(row[0])
+
+        # Clear current data
+        for table in ["activities", "goals", "templates", "habits",
+                      "habit_logs", "day_notes", "notifications_sent"]:
+            await db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM contexts WHERE user_id = ?", (user_id,))
+
+        # Restore contexts
+        ctx_id_map = {}
+        for c in data.get("contexts", []):
+            cur = await db.execute(
+                "INSERT INTO contexts (user_id, name, color) VALUES (?,?,?)",
+                (user_id, c["name"], c["color"])
+            )
+            ctx_id_map[c["name"]] = cur.lastrowid
+
+        # Restore activities
+        for a in data.get("activities", []):
+            ctx_id = ctx_id_map.get(a["ctx"])
+            if ctx_id:
+                await db.execute(
+                    """INSERT INTO activities
+                       (user_id, context_id, description, duration_minutes, activity_date, hour_slot, tags)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (user_id, ctx_id, a["desc"], a["dur"], a["date"], a["hour"], a.get("tags", ""))
+                )
+
+        # Restore goals
+        for g in data.get("goals", []):
+            ctx_id = ctx_id_map.get(g["ctx"])
+            if ctx_id:
+                await db.execute(
+                    "INSERT INTO goals (user_id, context_id, weekly_hours) VALUES (?,?,?)",
+                    (user_id, ctx_id, g["hours"])
+                )
+
+        # Restore day notes
+        for n in data.get("day_notes", []):
+            await db.execute(
+                "INSERT INTO day_notes (user_id, note_date, text) VALUES (?,?,?)",
+                (user_id, n["date"], n["text"])
+            )
+
+        # Restore templates
+        for t in data.get("templates", []):
+            ctx_id = ctx_id_map.get(t["ctx"])
+            if ctx_id:
+                await db.execute(
+                    "INSERT INTO templates (user_id, context_id, description, duration_minutes) VALUES (?,?,?,?)",
+                    (user_id, ctx_id, t["desc"], t["dur"])
+                )
+
+        # Restore habits
+        habit_id_map = {}
+        for h in data.get("habits", []):
+            cur = await db.execute(
+                "INSERT INTO habits (user_id, name, habit_type, emoji, sort_order) VALUES (?,?,?,?,?)",
+                (user_id, h["name"], h["type"], h["emoji"], h["sort"])
+            )
+            habit_id_map[h["name"]] = cur.lastrowid
+
+        # Restore habit logs
+        for hl in data.get("habit_logs", []):
+            habit_id = habit_id_map.get(hl["habit"])
+            if habit_id:
+                await db.execute(
+                    "INSERT INTO habit_logs (user_id, habit_id, log_date, time_start, time_end, text_value) VALUES (?,?,?,?,?,?)",
+                    (user_id, habit_id, hl["date"], hl["start"], hl["end"], hl["val"])
+                )
+
+        # Restore notification_hours
+        if "user" in data and data["user"].get("notification_hours"):
+            await db.execute(
+                "UPDATE users SET notification_hours = ? WHERE user_id = ?",
+                (data["user"]["notification_hours"], user_id)
+            )
+
+        await db.commit()
+        return True
+
+
+async def delete_snapshot(user_id: int, snapshot_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM snapshots WHERE id = ? AND user_id = ?",
+            (snapshot_id, user_id)
+        )
+        await db.commit()
+
+
+async def reset_user_data(user_id: int):
+    """Delete all user data but keep the user record."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        for table in ["activities", "goals", "templates", "habits",
+                      "habit_logs", "day_notes", "notifications_sent"]:
+            await db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM contexts WHERE user_id = ?", (user_id,))
         await db.commit()
 
 

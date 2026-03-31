@@ -35,6 +35,11 @@ class NotifFSM(StatesGroup):
     quick_adding = State()
 
 
+class SnapshotFSM(StatesGroup):
+    waiting_name = State()
+    waiting_reset_name = State()
+
+
 class HabitFSM(StatesGroup):
     waiting_time        = State()   # simple time HH:MM
     waiting_travel_from = State()
