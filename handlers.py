@@ -32,6 +32,8 @@ from database import (
     get_top_activities, get_streak, get_hour_patterns,
     get_templates, get_template_by_id, add_template, delete_template, increment_template_use,
     get_recent_unique_for_quick,
+    ensure_default_habits, get_habits, get_habit_by_id, add_habit, delete_habit,
+    get_habit_logs_today, log_habit, delete_habit_log,
 )
 from keyboards import (
     timezone_keyboard, notification_keyboard, notification_quick_keyboard,
@@ -41,11 +43,12 @@ from keyboards import (
     contexts_list_keyboard, context_menu_keyboard, color_picker_keyboard,
     ctx_delete_confirm_keyboard, goals_contexts_keyboard, export_keyboard,
     tags_keyboard, templates_keyboard, main_menu_keyboard,
-    hour_picker_keyboard, hour_picker_day_keyboard, PREDEFINED_TAGS,
+    hour_picker_keyboard, hour_picker_day_keyboard,
+    habits_keyboard, habit_action_keyboard, habits_manage_keyboard, PREDEFINED_TAGS,
 )
 import csv
 import io
-from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM, NotifFSM
+from states import Registration, ActivityFSM, EditFSM, ContextFSM, GoalFSM, NoteFSM, NotifFSM, HabitFSM
 
 try:
     import speech_recognition as sr
@@ -1157,6 +1160,252 @@ async def cmd_cancel(message: Message, state: FSMContext):
     await message.answer("❌ Отменено.")
 
 
+# ── Habits ───────────────────────────────────────────────────────────────────
+
+def _parse_time(text: str) -> Optional[str]:
+    """Parse '730', '7:30', '07:30' → '07:30'. Returns None if invalid."""
+    text = text.strip().replace(".", ":").replace("-", ":")
+    if ":" in text:
+        parts = text.split(":")
+    elif len(text) <= 2:
+        parts = [text, "00"]
+    elif len(text) == 3:
+        parts = [text[0], text[1:]]
+    elif len(text) == 4:
+        parts = [text[:2], text[2:]]
+    else:
+        return None
+    try:
+        h, m = int(parts[0]), int(parts[1])
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return f"{h:02d}:{m:02d}"
+    except (ValueError, IndexError):
+        pass
+    return None
+
+
+async def _habits_screen(user_id: int, today_str: str, target, edit: bool = False):
+    await ensure_default_habits(user_id)
+    habits   = await get_habits(user_id)
+    raw_logs = await get_habit_logs_today(user_id, today_str)
+    # Keep only last log per habit
+    logs = {}
+    for habit_id, ts, te, tv in raw_logs:
+        logs[habit_id] = (ts, te, tv)
+
+    text = f"🗓 <b>Привычки — {today_str}</b>\n\nНажми на привычку чтобы записать:"
+    kb   = habits_keyboard(habits, logs)
+    if edit:
+        await target.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.message(Command("habits"))
+async def cmd_habits(message: Message, state: FSMContext):
+    if not await user_exists(message.from_user.id):
+        await message.answer("Сначала зарегистрируйся: /start")
+        return
+    await state.clear()
+    user     = await get_user(message.from_user.id)
+    today    = datetime.now(pytz.timezone(user[2])).date().isoformat()
+    await _habits_screen(message.from_user.id, today, message)
+
+
+@router.callback_query(F.data == "hb_back")
+async def cb_hb_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    user  = await get_user(callback.from_user.id)
+    today = datetime.now(pytz.timezone(user[2])).date().isoformat()
+    await _habits_screen(callback.from_user.id, today, callback.message, edit=True)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("hb:"))
+async def cb_hb_select(callback: CallbackQuery, state: FSMContext):
+    habit_id = int(callback.data.split(":")[1])
+    habit    = await get_habit_by_id(habit_id, callback.from_user.id)
+    if not habit:
+        await callback.answer("Привычка не найдена", show_alert=True)
+        return
+
+    hid, name, habit_type, emoji = habit
+    user     = await get_user(callback.from_user.id)
+    today    = datetime.now(pytz.timezone(user[2])).date().isoformat()
+    raw_logs = await get_habit_logs_today(callback.from_user.id, today)
+    logged   = any(r[0] == habit_id for r in raw_logs)
+
+    await state.update_data(habit_id=habit_id, habit_type=habit_type, today=today)
+
+    if habit_type == "travel":
+        await state.set_state(HabitFSM.waiting_travel_from)
+        await callback.message.edit_text(
+            f"{emoji} <b>{name}</b>\n\n🚩 Откуда едешь?",
+            parse_mode="HTML",
+            reply_markup=habit_action_keyboard(habit_id, logged) if logged else None,
+        )
+        if logged:
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.message.edit_text(
+                f"{emoji} <b>{name}</b>\n\n"
+                "Уже записана поездка сегодня. Хочешь добавить ещё одну?\n\n"
+                "🚩 Откуда едешь?",
+                parse_mode="HTML",
+            )
+    else:
+        await state.set_state(HabitFSM.waiting_time)
+        hint = {
+            "wake":  "⏰ Во сколько встал? Например: <code>7:30</code>",
+            "sleep": "⏰ Во сколько лёг спать? Например: <code>23:00</code>",
+            "meal":  "⏰ Во сколько поел? Например: <code>13:00</code>",
+            "custom": "⏰ Во сколько? Например: <code>10:00</code>",
+        }.get(habit_type, "⏰ Введи время:")
+
+        await callback.message.edit_text(
+            f"{emoji} <b>{name}</b>\n\n{hint}",
+            parse_mode="HTML",
+        )
+    await callback.answer()
+
+
+@router.message(HabitFSM.waiting_time)
+async def fsm_habit_time(message: Message, state: FSMContext):
+    t = _parse_time(message.text)
+    if not t:
+        await message.answer("❌ Не понял. Введи время, например: <code>7:30</code> или <code>730</code>", parse_mode="HTML")
+        return
+    data = await state.get_data()
+    await log_habit(message.from_user.id, data["habit_id"], data["today"], time_start=t)
+    await state.clear()
+    habit = await get_habit_by_id(data["habit_id"], message.from_user.id)
+    await message.answer(f"✅ {habit[3]} <b>{habit[1]}</b> — {t}", parse_mode="HTML")
+    await _habits_screen(message.from_user.id, data["today"], message)
+
+
+# — Travel FSM —
+
+@router.message(HabitFSM.waiting_travel_from)
+async def fsm_travel_from(message: Message, state: FSMContext):
+    await state.update_data(travel_from=message.text.strip())
+    await state.set_state(HabitFSM.waiting_travel_to)
+    await message.answer("🏁 Куда едешь?")
+
+
+@router.message(HabitFSM.waiting_travel_to)
+async def fsm_travel_to(message: Message, state: FSMContext):
+    await state.update_data(travel_to=message.text.strip())
+    await state.set_state(HabitFSM.waiting_travel_dep)
+    await message.answer("⏰ Время выезда? Например: <code>8:30</code>", parse_mode="HTML")
+
+
+@router.message(HabitFSM.waiting_travel_dep)
+async def fsm_travel_dep(message: Message, state: FSMContext):
+    t = _parse_time(message.text)
+    if not t:
+        await message.answer("❌ Введи время, например: <code>8:30</code>", parse_mode="HTML")
+        return
+    await state.update_data(travel_dep=t)
+    await state.set_state(HabitFSM.waiting_travel_arr)
+    await message.answer("⏰ Время прибытия? Например: <code>9:15</code>", parse_mode="HTML")
+
+
+@router.message(HabitFSM.waiting_travel_arr)
+async def fsm_travel_arr(message: Message, state: FSMContext):
+    t = _parse_time(message.text)
+    if not t:
+        await message.answer("❌ Введи время, например: <code>9:15</code>", parse_mode="HTML")
+        return
+    data = await state.get_data()
+    frm  = data["travel_from"]
+    to   = data["travel_to"]
+    dep  = data["travel_dep"]
+    tv   = f"{frm} → {to}"
+    await log_habit(
+        message.from_user.id, data["habit_id"], data["today"],
+        time_start=dep, time_end=t, text_value=tv,
+    )
+    await state.clear()
+    await message.answer(
+        f"✅ 🚗 <b>Дорога записана</b>\n{frm} → {to}\n⏰ {dep} – {t}",
+        parse_mode="HTML",
+    )
+    await _habits_screen(message.from_user.id, data["today"], message)
+
+
+# — Delete log —
+
+@router.callback_query(F.data.startswith("hb_del:"))
+async def cb_hb_del(callback: CallbackQuery, state: FSMContext):
+    habit_id = int(callback.data.split(":")[1])
+    user     = await get_user(callback.from_user.id)
+    today    = datetime.now(pytz.timezone(user[2])).date().isoformat()
+    await delete_habit_log(callback.from_user.id, habit_id, today)
+    await state.clear()
+    await _habits_screen(callback.from_user.id, today, callback.message, edit=True)
+    await callback.answer("🗑 Запись удалена")
+
+
+# — New custom habit —
+
+@router.callback_query(F.data == "hb_new")
+async def cb_hb_new(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(HabitFSM.waiting_custom_name)
+    await callback.message.edit_text(
+        "➕ <b>Новая привычка</b>\n\nКак она называется?\n<i>Например: Медитация, Чтение, Прогулка</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(HabitFSM.waiting_custom_name)
+async def fsm_habit_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if len(name) > 40:
+        await message.answer("❌ Максимум 40 символов.")
+        return
+    await state.update_data(habit_name=name)
+    await state.set_state(HabitFSM.waiting_custom_emoji)
+    await message.answer(
+        f"Отлично! Выбери эмодзи для <b>{name}</b>\n\n"
+        "Просто отправь любой эмодзи, например: 🧘 📚 🏃 💊 💧",
+        parse_mode="HTML",
+    )
+
+
+@router.message(HabitFSM.waiting_custom_emoji)
+async def fsm_habit_emoji(message: Message, state: FSMContext):
+    emoji = message.text.strip()
+    data  = await state.get_data()
+    await add_habit(message.from_user.id, data["habit_name"], emoji)
+    await state.clear()
+    user  = await get_user(message.from_user.id)
+    today = datetime.now(pytz.timezone(user[2])).date().isoformat()
+    await message.answer(f"✅ Привычка {emoji} <b>{data['habit_name']}</b> добавлена!", parse_mode="HTML")
+    await _habits_screen(message.from_user.id, today, message)
+
+
+# — Manage habits —
+
+@router.callback_query(F.data == "hb_manage")
+async def cb_hb_manage(callback: CallbackQuery):
+    habits = await get_habits(callback.from_user.id)
+    await callback.message.edit_text(
+        "🗑 <b>Управление привычками</b>\n\nНажми 🗑 чтобы скрыть привычку:",
+        parse_mode="HTML",
+        reply_markup=habits_manage_keyboard(habits),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("hb_rm:"))
+async def cb_hb_remove(callback: CallbackQuery):
+    habit_id = int(callback.data.split(":")[1])
+    await delete_habit(habit_id, callback.from_user.id)
+    habits = await get_habits(callback.from_user.id)
+    await callback.message.edit_reply_markup(reply_markup=habits_manage_keyboard(habits))
+    await callback.answer("Скрыто")
+
+
 # ── Main menu button handlers ────────────────────────────────────────────────
 
 @router.message(F.text == "➕ Добавить")
@@ -1194,6 +1443,10 @@ async def menu_note(message: Message, state: FSMContext):
 @router.message(F.text == "📤 Экспорт")
 async def menu_export(message: Message):
     await cmd_export(message)
+
+@router.message(F.text == "🗓 Привычки")
+async def menu_habits(message: Message, state: FSMContext):
+    await cmd_habits(message, state)
 
 @router.message(F.text == "🏷 Контексты")
 async def menu_contexts(message: Message, state: FSMContext):

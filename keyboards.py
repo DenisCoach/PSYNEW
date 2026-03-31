@@ -25,8 +25,11 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
         KeyboardButton(text="📤 Экспорт"),
     )
     builder.row(
+        KeyboardButton(text="🗓 Привычки"),
         KeyboardButton(text="🏷 Контексты"),
         KeyboardButton(text="⏰ Расписание"),
+    )
+    builder.row(
         KeyboardButton(text="⚙️ Настройки"),
     )
     return builder.as_markup(resize_keyboard=True, persistent=True)
@@ -155,6 +158,52 @@ def goals_contexts_keyboard(contexts: List[Tuple], goals: dict) -> InlineKeyboar
         suffix = f" → {target}ч/нед" if target else ""
         builder.button(text=f"{color} {name}{suffix}", callback_data=f"gl:{ctx_id}")
     builder.adjust(1)
+    return builder.as_markup()
+
+
+def habits_keyboard(habits: List[Tuple], logs: dict) -> InlineKeyboardMarkup:
+    """Main habits screen.
+    habits: [(id, name, habit_type, emoji, sort_order), ...]
+    logs:   {habit_id: (time_start, time_end, text_value)}"""
+    builder = InlineKeyboardBuilder()
+    for habit_id, name, habit_type, emoji, _ in habits:
+        if habit_id in logs:
+            ts, te, tv = logs[habit_id]
+            if habit_type == "travel" and tv:
+                status = f"✅ {tv}"
+            elif te:
+                status = f"✅ {ts}–{te}"
+            elif ts:
+                status = f"✅ {ts}"
+            else:
+                status = "✅"
+            label = f"{emoji} {name}  {status}"
+        else:
+            label = f"{emoji} {name}  ○"
+        builder.button(text=label, callback_data=f"hb:{habit_id}")
+    builder.button(text="➕ Своя привычка", callback_data="hb_new")
+    builder.button(text="🗑 Управление",    callback_data="hb_manage")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def habit_action_keyboard(habit_id: int, logged: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Записать",  callback_data=f"hb_log:{habit_id}")
+    if logged:
+        builder.button(text="🗑 Сбросить", callback_data=f"hb_del:{habit_id}")
+    builder.button(text="◀️ Назад",     callback_data="hb_back")
+    builder.adjust(2, 1) if logged else builder.adjust(1, 1)
+    return builder.as_markup()
+
+
+def habits_manage_keyboard(habits: List[Tuple]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for habit_id, name, habit_type, emoji, _ in habits:
+        builder.button(text=f"{emoji} {name}", callback_data=f"hb_info:{habit_id}")
+        builder.button(text="🗑",              callback_data=f"hb_rm:{habit_id}")
+    builder.button(text="◀️ Назад", callback_data="hb_back")
+    builder.adjust(*([2] * len(habits) + [1]))
     return builder.as_markup()
 
 

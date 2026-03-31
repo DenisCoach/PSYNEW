@@ -33,3 +33,13 @@ class NoteFSM(StatesGroup):
 
 class NotifFSM(StatesGroup):
     quick_adding = State()
+
+
+class HabitFSM(StatesGroup):
+    waiting_time        = State()   # simple time HH:MM
+    waiting_travel_from = State()
+    waiting_travel_to   = State()
+    waiting_travel_dep  = State()
+    waiting_travel_arr  = State()
+    waiting_custom_name = State()
+    waiting_custom_emoji = State()

@@ -66,6 +66,31 @@ async def init_db():
                 FOREIGN KEY (context_id) REFERENCES contexts(id)
             );
 
+            CREATE TABLE IF NOT EXISTS habits (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                name       TEXT    NOT NULL,
+                habit_type TEXT    NOT NULL DEFAULT 'custom',
+                emoji      TEXT    NOT NULL DEFAULT '📌',
+                is_active  INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 99,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS habit_logs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                habit_id    INTEGER NOT NULL,
+                log_date    TEXT    NOT NULL,
+                time_start  TEXT,
+                time_end    TEXT,
+                text_value  TEXT,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id)  REFERENCES users(user_id),
+                FOREIGN KEY (habit_id) REFERENCES habits(id)
+            );
+
             CREATE TABLE IF NOT EXISTS templates (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id          INTEGER NOT NULL,
@@ -82,6 +107,26 @@ async def init_db():
         for sql in [
             "ALTER TABLE users ADD COLUMN notification_hours TEXT NOT NULL DEFAULT '10,11,12,13,14,15,16,17,18,19,20,21'",
             "ALTER TABLE activities ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
+            """CREATE TABLE IF NOT EXISTS habits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                habit_type TEXT NOT NULL DEFAULT 'custom',
+                emoji TEXT NOT NULL DEFAULT '📌',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 99,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            """CREATE TABLE IF NOT EXISTS habit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                habit_id INTEGER NOT NULL,
+                log_date TEXT NOT NULL,
+                time_start TEXT,
+                time_end TEXT,
+                text_value TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
             """CREATE TABLE IF NOT EXISTS templates (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id          INTEGER NOT NULL,
@@ -726,6 +771,115 @@ async def get_weekly_dynamics(user_id: int, weeks: int = 8) -> List[Tuple]:
     all_weeks = sorted(set(r[0] for r in all_rows))
     recent_weeks = set(all_weeks[-weeks:])
     return [r for r in all_rows if r[0] in recent_weeks]
+
+
+# ── Habits ───────────────────────────────────────────────────────────────────
+
+DEFAULT_HABITS = [
+    ("🌅", "Подъём",        "wake",    0),
+    ("🌙", "Отход ко сну",  "sleep",   1),
+    ("🍳", "Завтрак",       "meal",    2),
+    ("🥗", "Обед",          "meal",    3),
+    ("🍽", "Ужин",          "meal",    4),
+    ("🚗", "Дорога",        "travel",  5),
+]
+
+
+async def ensure_default_habits(user_id: int):
+    """Create default habits for user if they have none yet."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM habits WHERE user_id = ?", (user_id,)
+        )
+        count = (await cur.fetchone())[0]
+        if count == 0:
+            for emoji, name, habit_type, sort_order in DEFAULT_HABITS:
+                await db.execute(
+                    "INSERT INTO habits (user_id, name, habit_type, emoji, sort_order) VALUES (?,?,?,?,?)",
+                    (user_id, name, habit_type, emoji, sort_order),
+                )
+            await db.commit()
+
+
+async def get_habits(user_id: int) -> List[Tuple]:
+    """Returns [(id, name, habit_type, emoji, sort_order), ...] active habits."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT id, name, habit_type, emoji, sort_order
+               FROM habits WHERE user_id = ? AND is_active = 1
+               ORDER BY sort_order, id""",
+            (user_id,),
+        )
+        return await cur.fetchall()
+
+
+async def get_habit_by_id(habit_id: int, user_id: int) -> Optional[Tuple]:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT id, name, habit_type, emoji FROM habits WHERE id = ? AND user_id = ?",
+            (habit_id, user_id),
+        )
+        return await cur.fetchone()
+
+
+async def add_habit(user_id: int, name: str, emoji: str, habit_type: str = "custom") -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM habits WHERE user_id = ?",
+            (user_id,),
+        )
+        sort_order = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "INSERT INTO habits (user_id, name, habit_type, emoji, sort_order) VALUES (?,?,?,?,?)",
+            (user_id, name, "custom", emoji, sort_order),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def delete_habit(habit_id: int, user_id: int):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "UPDATE habits SET is_active = 0 WHERE id = ? AND user_id = ?",
+            (habit_id, user_id),
+        )
+        await db.commit()
+
+
+async def get_habit_logs_today(user_id: int, log_date: str) -> List[Tuple]:
+    """Returns [(habit_id, time_start, time_end, text_value), ...] for today."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT habit_id, time_start, time_end, text_value
+               FROM habit_logs WHERE user_id = ? AND log_date = ?""",
+            (user_id, log_date),
+        )
+        return await cur.fetchall()
+
+
+async def log_habit(
+    user_id: int, habit_id: int, log_date: str,
+    time_start: Optional[str] = None,
+    time_end: Optional[str] = None,
+    text_value: Optional[str] = None,
+) -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO habit_logs (user_id, habit_id, log_date, time_start, time_end, text_value)
+               VALUES (?,?,?,?,?,?)""",
+            (user_id, habit_id, log_date, time_start, time_end, text_value),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def delete_habit_log(user_id: int, habit_id: int, log_date: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "DELETE FROM habit_logs WHERE user_id = ? AND habit_id = ? AND log_date = ?",
+            (user_id, habit_id, log_date),
+        )
+        await db.commit()
 
 
 async def get_goals_below_threshold(
