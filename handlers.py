@@ -364,6 +364,20 @@ async def cb_quick_notif_add(callback: CallbackQuery, state: FSMContext):
     await callback.answer("✅ Записано!")
 
 
+@router.callback_query(F.data.startswith("qk_custom:"))
+async def cb_qk_custom(callback: CallbackQuery, state: FSMContext):
+    """User wants to enter a custom activity from the quick-add menu."""
+    parts    = callback.data.split(":")
+    date_str = parts[1]
+    hour     = int(parts[2])
+    await state.update_data(date_str=date_str, hour=hour)
+    await state.set_state(ActivityFSM.waiting_description)
+    await callback.message.answer(
+        f"📝 Что ты делал с {hour:02d}:00 до {hour + 1:02d}:00?\n\nОпиши занятие:"
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("qk_more:"))
 async def cb_qk_more(callback: CallbackQuery, state: FSMContext):
     """Show quick options again to add another activity."""

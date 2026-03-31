@@ -67,7 +67,7 @@ def notification_quick_keyboard(
             text=f"{color} {short} · {_fmt_dur(dur)}",
             callback_data=f"qk:{act_id}:{date_str}:{hour}",
         )
-    builder.button(text="✏️ Своё дело",  callback_data=f"act_add:{date_str}:{hour}")
+    builder.button(text="✏️ Своё дело",  callback_data=f"qk_custom:{date_str}:{hour}")
     builder.button(text="⏭ Пропустить", callback_data=f"act_skip:{date_str}:{hour}")
     builder.adjust(1)
     return builder.as_markup()
