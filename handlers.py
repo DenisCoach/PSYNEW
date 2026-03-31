@@ -11,7 +11,7 @@ from typing import Optional, List, Tuple
 
 import pytz
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, InlineKeyboardMarkup
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 
