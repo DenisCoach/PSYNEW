@@ -53,6 +53,7 @@ from keyboards import (
     reset_confirm_keyboard,
     place_picker_keyboard, people_picker_keyboard,
     places_list_keyboard, people_list_keyboard,
+    space_menu_keyboard,
     PREDEFINED_TAGS,
 )
 import csv
@@ -1820,17 +1821,35 @@ async def menu_export(message: Message):
 async def menu_habits(message: Message, state: FSMContext):
     await cmd_habits(message, state)
 
-@router.message(F.text == "📍 Места")
-async def menu_places(message: Message, state: FSMContext):
-    await cmd_places(message, state)
+@router.message(F.text == "🌐 Пространство")
+async def menu_space(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("🌐 <b>Пространство</b>", parse_mode="HTML", reply_markup=space_menu_keyboard())
 
-@router.message(F.text == "👥 Люди")
-async def menu_people(message: Message, state: FSMContext):
-    await cmd_people(message, state)
+@router.callback_query(F.data == "space:contexts")
+async def cb_space_contexts(callback: CallbackQuery, state: FSMContext):
+    await _show_contexts(callback.from_user.id, callback.message, edit=True)
+    await callback.answer()
 
-@router.message(F.text == "🏷 Контексты")
-async def menu_contexts(message: Message, state: FSMContext):
-    await cmd_contexts(message, state)
+@router.callback_query(F.data == "space:places")
+async def cb_space_places(callback: CallbackQuery, state: FSMContext):
+    places = await get_places(callback.from_user.id)
+    text = "📍 <b>Твои места:</b>" if places else "📍 <b>Мест пока нет.</b>"
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=places_list_keyboard(places))
+    await callback.answer()
+
+@router.callback_query(F.data == "space:people")
+async def cb_space_people(callback: CallbackQuery, state: FSMContext):
+    people = await get_people(callback.from_user.id)
+    text = "👥 <b>Твои люди:</b>" if people else "👥 <b>Людей пока нет.</b>"
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=people_list_keyboard(people))
+    await callback.answer()
+
+@router.callback_query(F.data == "space_back")
+async def cb_space_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("🌐 <b>Пространство</b>", parse_mode="HTML", reply_markup=space_menu_keyboard())
+    await callback.answer()
 
 @router.message(F.text == "⏰ Расписание")
 async def menu_schedule(message: Message):

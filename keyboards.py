@@ -26,12 +26,10 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     )
     builder.row(
         KeyboardButton(text="🗓 Привычки"),
-        KeyboardButton(text="📍 Места"),
-        KeyboardButton(text="👥 Люди"),
+        KeyboardButton(text="🌐 Пространство"),
+        KeyboardButton(text="⏰ Расписание"),
     )
     builder.row(
-        KeyboardButton(text="🏷 Контексты"),
-        KeyboardButton(text="⏰ Расписание"),
         KeyboardButton(text="⚙️ Настройки"),
     )
     return builder.as_markup(resize_keyboard=True, persistent=True)
@@ -219,6 +217,15 @@ def people_picker_keyboard(people: List[Tuple], act_id: int, selected: List[int]
     return builder.as_markup()
 
 
+def space_menu_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🏷 Контексты", callback_data="space:contexts")
+    builder.button(text="📍 Места",     callback_data="space:places")
+    builder.button(text="👥 Люди",      callback_data="space:people")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def places_list_keyboard(places: List[Tuple]) -> InlineKeyboardMarkup:
     """Management screen. places: [(id, name, emoji), ...]"""
     builder = InlineKeyboardBuilder()
@@ -226,7 +233,8 @@ def places_list_keyboard(places: List[Tuple]) -> InlineKeyboardMarkup:
         builder.button(text=f"{emoji} {name}", callback_data=f"pl:{place_id}")
         builder.button(text="🗑",              callback_data=f"pl_del:{place_id}")
     builder.button(text="➕ Добавить место", callback_data="pl_add")
-    builder.adjust(*([2] * len(places) + [1]))
+    builder.button(text="◀️ Назад",          callback_data="space_back")
+    builder.adjust(*([2] * len(places) + [1, 1]))
     return builder.as_markup()
 
 
@@ -237,7 +245,8 @@ def people_list_keyboard(people: List[Tuple]) -> InlineKeyboardMarkup:
         builder.button(text=f"👤 {name}", callback_data=f"pp:{person_id}")
         builder.button(text="🗑",         callback_data=f"pp_del:{person_id}")
     builder.button(text="➕ Добавить человека", callback_data="pp_add")
-    builder.adjust(*([2] * len(people) + [1]))
+    builder.button(text="◀️ Назад",             callback_data="space_back")
+    builder.adjust(*([2] * len(people) + [1, 1]))
     return builder.as_markup()
 
 
