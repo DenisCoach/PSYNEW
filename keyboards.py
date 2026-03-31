@@ -88,6 +88,18 @@ def notification_added_keyboard(
     return builder.as_markup()
 
 
+def duration_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for label, minutes in [
+        ("15 мин", 15), ("30 мин", 30), ("45 мин", 45),
+        ("1 ч",    60), ("1.5 ч",  90), ("2 ч",   120),
+        ("3 ч",   180), ("✏️ Своё", 0),
+    ]:
+        builder.button(text=label, callback_data=f"dur:{minutes}")
+    builder.adjust(3, 3, 2)
+    return builder.as_markup()
+
+
 def contexts_keyboard(
     contexts: List[Tuple[int, str, str]], date_str: str, hour: int
 ) -> InlineKeyboardMarkup:

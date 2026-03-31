@@ -44,7 +44,8 @@ from keyboards import (
     ctx_delete_confirm_keyboard, goals_contexts_keyboard, export_keyboard,
     tags_keyboard, templates_keyboard, main_menu_keyboard,
     hour_picker_keyboard, hour_picker_day_keyboard,
-    habits_keyboard, habit_action_keyboard, habits_manage_keyboard, PREDEFINED_TAGS,
+    habits_keyboard, habit_action_keyboard, habits_manage_keyboard,
+    duration_keyboard, PREDEFINED_TAGS,
 )
 import csv
 import io
@@ -511,15 +512,39 @@ async def cb_addhour(callback: CallbackQuery, state: FSMContext):
 
 # ── FSM steps ─────────────────────────────────────────────────────────────────
 
+DURATION_PROMPT = (
+    "⏱ Сколько времени это заняло?\n\n"
+    "Выбери или напиши своё: <code>45 мин</code>  <code>1ч 30мин</code>"
+)
+
 @router.message(ActivityFSM.waiting_description)
 async def fsm_description(message: Message, state: FSMContext):
     await state.update_data(description=message.text.strip())
     await state.set_state(ActivityFSM.waiting_duration)
-    await message.answer(
-        "⏱ Сколько времени это заняло?\n\n"
-        "Примеры: <code>30</code>  <code>45 мин</code>  <code>1ч</code>  <code>1ч 30мин</code>",
-        parse_mode="HTML",
+    await message.answer(DURATION_PROMPT, parse_mode="HTML", reply_markup=duration_keyboard())
+
+
+@router.callback_query(F.data.startswith("dur:"), ActivityFSM.waiting_duration)
+async def cb_duration_pick(callback: CallbackQuery, state: FSMContext):
+    minutes = int(callback.data.split(":")[1])
+    if minutes == 0:
+        # "✏️ Своё" — ask for text input
+        await callback.message.edit_text(
+            "⏱ Введи своё время:\n<code>45 мин</code>  <code>1ч 30мин</code>  <code>90</code>",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    await state.update_data(duration=minutes)
+    await state.set_state(ActivityFSM.choosing_context)
+    data = await state.get_data()
+    contexts = await get_user_contexts(callback.from_user.id)
+    await callback.message.edit_text(
+        f"⏱ {fmt_dur(minutes)}\n\n🏷 Выбери контекст:",
+        reply_markup=contexts_keyboard(contexts, data["date_str"], data["hour"]),
     )
+    await callback.answer()
 
 
 @router.message(ActivityFSM.waiting_duration)
@@ -527,9 +552,9 @@ async def fsm_duration(message: Message, state: FSMContext):
     minutes = parse_duration(message.text)
     if not minutes or minutes > 600:
         await message.answer(
-            "❌ Не понял. Введи длительность, например:\n"
-            "<code>30</code>  <code>1ч 30мин</code>  <code>45 мин</code>",
+            "❌ Не понял. Например: <code>30</code>  <code>1ч 30мин</code>  <code>45 мин</code>",
             parse_mode="HTML",
+            reply_markup=duration_keyboard(),
         )
         return
 
@@ -537,9 +562,8 @@ async def fsm_duration(message: Message, state: FSMContext):
     await state.set_state(ActivityFSM.choosing_context)
     data = await state.get_data()
     contexts = await get_user_contexts(message.from_user.id)
-
     await message.answer(
-        "🏷 Выбери контекст:",
+        f"⏱ {fmt_dur(minutes)}\n\n🏷 Выбери контекст:",
         reply_markup=contexts_keyboard(contexts, data["date_str"], data["hour"]),
     )
 
@@ -778,9 +802,31 @@ async def cb_edit_dur_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(EditFSM.waiting_new_duration)
     await state.update_data(act_id=act_id)
     await callback.message.answer(
-        "⏱ Введи новую длительность:\n"
-        "<code>30</code>  <code>1ч</code>  <code>1ч 30мин</code>",
+        "⏱ Новая длительность:",
+        reply_markup=duration_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("dur:"), EditFSM.waiting_new_duration)
+async def cb_edit_dur_pick(callback: CallbackQuery, state: FSMContext):
+    minutes = int(callback.data.split(":")[1])
+    if minutes == 0:
+        await callback.message.edit_text(
+            "⏱ Введи своё время:\n<code>30</code>  <code>1ч</code>  <code>1ч 30мин</code>",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+    data = await state.get_data()
+    await update_activity_duration(data["act_id"], callback.from_user.id, minutes)
+    await state.clear()
+    act  = await get_activity_by_id(data["act_id"], callback.from_user.id)
+    text = await _activity_text(act)
+    await callback.message.edit_text(
+        f"✅ Время обновлено!\n\n{text}",
         parse_mode="HTML",
+        reply_markup=edit_menu_keyboard(data["act_id"]),
     )
     await callback.answer()
 
