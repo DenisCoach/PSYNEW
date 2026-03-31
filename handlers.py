@@ -920,21 +920,23 @@ async def cb_delete_ok(callback: CallbackQuery):
 
 # ── Context management ────────────────────────────────────────────────────────
 
+async def _show_contexts(user_id: int, target, edit: bool = False):
+    contexts = await get_user_contexts(user_id)
+    text = "🏷 <b>Твои контексты:</b>" if contexts else "🏷 <b>Контекстов пока нет.</b>\n\nДобавь первый:"
+    kb   = contexts_list_keyboard(contexts)
+    if edit:
+        await target.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
 @router.message(Command("contexts"))
 async def cmd_contexts(message: Message, state: FSMContext):
     if not await user_exists(message.from_user.id):
         await message.answer("Сначала зарегистрируйся: /start")
         return
     await state.clear()
-    contexts = await get_user_contexts(message.from_user.id)
-    if not contexts:
-        await message.answer("У тебя пока нет контекстов.")
-        return
-    await message.answer(
-        "🏷 <b>Твои контексты:</b>",
-        parse_mode="HTML",
-        reply_markup=contexts_list_keyboard(contexts),
-    )
+    await _show_contexts(message.from_user.id, message)
 
 
 @router.callback_query(F.data.startswith("cm:"))
@@ -955,13 +957,9 @@ async def cb_ctx_menu(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "cm_back")
-async def cb_ctx_back(callback: CallbackQuery):
-    contexts = await get_user_contexts(callback.from_user.id)
-    await callback.message.edit_text(
-        "🏷 <b>Твои контексты:</b>",
-        parse_mode="HTML",
-        reply_markup=contexts_list_keyboard(contexts),
-    )
+async def cb_ctx_back(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await _show_contexts(callback.from_user.id, callback.message, edit=True)
     await callback.answer()
 
 
@@ -970,9 +968,13 @@ async def cb_ctx_back(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("cm_ren:"))
 async def cb_ctx_rename_start(callback: CallbackQuery, state: FSMContext):
     ctx_id = int(callback.data.split(":")[1])
+    ctx    = await get_context_by_id(ctx_id, callback.from_user.id)
     await state.set_state(ContextFSM.waiting_new_name)
     await state.update_data(ctx_id=ctx_id)
-    await callback.message.answer("✏️ Введи новое название контекста:")
+    await callback.message.edit_text(
+        f"✏️ Переименовать {ctx[2]} <b>{ctx[1]}</b>\n\nВведи новое название:",
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
@@ -986,8 +988,9 @@ async def fsm_ctx_rename(message: Message, state: FSMContext):
     await rename_context(data["ctx_id"], message.from_user.id, name)
     await state.clear()
     ctx = await get_context_by_id(data["ctx_id"], message.from_user.id)
+    count = await count_context_activities(data["ctx_id"], message.from_user.id)
     await message.answer(
-        f"✅ Переименовано: {ctx[2]} <b>{ctx[1]}</b>",
+        f"✅ Переименовано: {ctx[2]} <b>{ctx[1]}</b>\n📝 Записей: {count}",
         parse_mode="HTML",
         reply_markup=context_menu_keyboard(data["ctx_id"]),
     )
@@ -1040,16 +1043,36 @@ async def cb_ctx_delete_confirm(callback: CallbackQuery):
 async def cb_ctx_delete_ok(callback: CallbackQuery):
     ctx_id = int(callback.data.split(":")[1])
     await delete_context(ctx_id, callback.from_user.id)
-    contexts = await get_user_contexts(callback.from_user.id)
-    if contexts:
-        await callback.message.edit_text(
-            "✅ Контекст удалён.\n\n🏷 <b>Твои контексты:</b>",
-            parse_mode="HTML",
-            reply_markup=contexts_list_keyboard(contexts),
-        )
-    else:
-        await callback.message.edit_text("✅ Контекст удалён. Контекстов больше нет.")
+    await _show_contexts(callback.from_user.id, callback.message, edit=True)
+    await callback.answer("✅ Контекст удалён")
+
+
+# — Add new context —
+
+@router.callback_query(F.data == "cm_add")
+async def cb_ctx_add(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ContextFSM.waiting_create_name)
+    await callback.message.edit_text(
+        "➕ <b>Новый контекст</b>\n\n"
+        "Введи название, например: <i>Спорт, Работа, Учёба</i>",
+        parse_mode="HTML",
+    )
     await callback.answer()
+
+
+@router.message(ContextFSM.waiting_create_name)
+async def fsm_ctx_create(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if len(name) > 30:
+        await message.answer("❌ Максимум 30 символов.")
+        return
+    ctx_id, color = await get_or_create_context(message.from_user.id, name)
+    await state.clear()
+    await message.answer(
+        f"✅ Контекст {color} <b>{name}</b> создан!",
+        parse_mode="HTML",
+        reply_markup=context_menu_keyboard(ctx_id),
+    )
 
 
 # ── Export ────────────────────────────────────────────────────────────────────

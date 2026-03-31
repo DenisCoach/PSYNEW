@@ -132,6 +132,7 @@ def contexts_list_keyboard(contexts: List[Tuple]) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for ctx_id, name, color in contexts:
         builder.button(text=f"{color} {name}", callback_data=f"cm:{ctx_id}")
+    builder.button(text="➕ Добавить контекст", callback_data="cm_add")
     builder.adjust(1)
     return builder.as_markup()
 
