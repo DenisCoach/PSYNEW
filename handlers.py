@@ -2552,3 +2552,9 @@ async def cmd_admin_user(message: Message):
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(WELCOME_TEXT, parse_mode="HTML")
+
+
+@router.callback_query()
+async def debug_unhandled_callback(callback: CallbackQuery):
+    logger.warning(f"UNHANDLED CALLBACK: data={callback.data!r} from user={callback.from_user.id}")
+    await callback.answer("⚠️ Нажми 🌐 Пространство заново", show_alert=False)
