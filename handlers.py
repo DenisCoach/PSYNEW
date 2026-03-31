@@ -373,8 +373,10 @@ async def cb_qk_custom(callback: CallbackQuery, state: FSMContext):
     hour     = int(parts[2])
     await state.update_data(date_str=date_str, hour=hour)
     await state.set_state(ActivityFSM.waiting_description)
-    await callback.message.answer(
-        f"📝 Что ты делал с {hour:02d}:00 до {hour + 1:02d}:00?\n\nОпиши занятие:"
+    await callback.message.edit_text(
+        f"📝 <b>{hour:02d}:00–{hour + 1:02d}:00</b>  |  {date_str}\n\n"
+        "Опиши занятие — просто напиши текст:",
+        parse_mode="HTML",
     )
     await callback.answer()
 
@@ -497,8 +499,8 @@ async def cb_addhour(callback: CallbackQuery, state: FSMContext):
     else:
         await state.set_state(ActivityFSM.waiting_description)
         await callback.message.edit_text(
-            f"📝 Добавляем дело за <b>{hour:02d}:00–{hour + 1:02d}:00</b> ({date_str})\n\n"
-            "Опиши что ты делал:",
+            f"📝 <b>{hour:02d}:00–{hour + 1:02d}:00</b>  |  {date_str}\n\n"
+            "Опиши занятие — просто напиши текст:",
             parse_mode="HTML",
         )
     await callback.answer()
