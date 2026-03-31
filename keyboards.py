@@ -197,6 +197,41 @@ def delete_confirm_keyboard(act_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def hour_picker_keyboard(today_str: str, yesterday_str: str, current_hour: int) -> InlineKeyboardMarkup:
+    """Grid of hours for manual add. Shows today and yesterday tabs + hour buttons."""
+    builder = InlineKeyboardBuilder()
+    # Day selector
+    builder.button(text="📅 Сегодня ✓", callback_data=f"addday:{today_str}:{current_hour}")
+    builder.button(text="📅 Вчера",      callback_data=f"addday:{yesterday_str}:{current_hour}")
+    builder.adjust(2)
+    # Hours 0–23, mark current hour
+    for h in range(0, 24):
+        label = f"▶ {h:02d}:00" if h == current_hour else f"{h:02d}:00"
+        builder.button(text=label, callback_data=f"addhour:{today_str}:{h}")
+    builder.adjust(2, *([4] * 6))
+    return builder.as_markup()
+
+
+def hour_picker_day_keyboard(date_str: str, today_str: str, yesterday_str: str, current_hour: int) -> InlineKeyboardMarkup:
+    """Same picker but with correct day selected."""
+    builder = InlineKeyboardBuilder()
+    is_today = date_str == today_str
+    builder.button(
+        text="📅 Сегодня ✓" if is_today else "📅 Сегодня",
+        callback_data=f"addday:{today_str}:{current_hour}",
+    )
+    builder.button(
+        text="📅 Вчера ✓" if not is_today else "📅 Вчера",
+        callback_data=f"addday:{yesterday_str}:{current_hour}",
+    )
+    builder.adjust(2)
+    for h in range(0, 24):
+        label = f"▶ {h:02d}:00" if h == current_hour else f"{h:02d}:00"
+        builder.button(text=label, callback_data=f"addhour:{date_str}:{h}")
+    builder.adjust(2, *([4] * 6))
+    return builder.as_markup()
+
+
 def schedule_keyboard(active_hours: List[int]) -> InlineKeyboardMarkup:
     """Grid of all 24 hours. Active = ✅, inactive = ☐"""
     builder = InlineKeyboardBuilder()

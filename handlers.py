@@ -40,7 +40,8 @@ from keyboards import (
     activities_list_keyboard, edit_menu_keyboard, delete_confirm_keyboard,
     contexts_list_keyboard, context_menu_keyboard, color_picker_keyboard,
     ctx_delete_confirm_keyboard, goals_contexts_keyboard, export_keyboard,
-    tags_keyboard, templates_keyboard, main_menu_keyboard, PREDEFINED_TAGS,
+    tags_keyboard, templates_keyboard, main_menu_keyboard,
+    hour_picker_keyboard, hour_picker_day_keyboard, PREDEFINED_TAGS,
 )
 import csv
 import io
@@ -438,23 +439,69 @@ async def cb_act_done(callback: CallbackQuery, state: FSMContext):
 
 # ── /add — manual entry ───────────────────────────────────────────────────────
 
+async def _show_hour_picker(target: Message, user_id: int, edit: bool = False):
+    user = await get_user(user_id)
+    tz   = pytz.timezone(user[2])
+    now  = datetime.now(tz)
+    today_str     = now.date().isoformat()
+    yesterday_str = (now.date() - timedelta(days=1)).isoformat()
+    kb = hour_picker_keyboard(today_str, yesterday_str, now.hour)
+    text = "🕐 <b>За какой час добавить дело?</b>\n\nВыбери день и час:"
+    if edit:
+        await target.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
 @router.message(Command("add"))
 async def cmd_add(message: Message, state: FSMContext):
     if not await user_exists(message.from_user.id):
         await message.answer("Сначала зарегистрируйся: /start")
         return
-    user = await get_user(message.from_user.id)
-    tz = pytz.timezone(user[2])
-    now = datetime.now(tz)
-    hour = now.hour
-    date_str = now.date().isoformat()
+    await state.clear()
+    await _show_hour_picker(message, message.from_user.id)
 
+
+@router.callback_query(F.data.startswith("addday:"))
+async def cb_addday(callback: CallbackQuery, state: FSMContext):
+    """Switch selected day in the hour picker."""
+    _, date_str, hour_str = callback.data.split(":")
+    user = await get_user(callback.from_user.id)
+    tz   = pytz.timezone(user[2])
+    now  = datetime.now(tz)
+    today_str     = now.date().isoformat()
+    yesterday_str = (now.date() - timedelta(days=1)).isoformat()
+    kb = hour_picker_day_keyboard(date_str, today_str, yesterday_str, int(hour_str))
+    await callback.message.edit_reply_markup(reply_markup=kb)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("addhour:"))
+async def cb_addhour(callback: CallbackQuery, state: FSMContext):
+    """Hour selected — proceed to description input."""
+    _, date_str, hour_str = callback.data.split(":")
+    hour = int(hour_str)
     await state.update_data(date_str=date_str, hour=hour)
     await state.set_state(ActivityFSM.waiting_description)
-    await message.answer(
-        f"📝 Добавляем дело за {hour:02d}:00–{hour + 1:02d}:00 ({date_str})\n\n"
-        "Опиши что ты делал:"
-    )
+
+    recent = await get_recent_unique_for_quick(callback.from_user.id)
+    if recent:
+        await state.update_data(added=[])
+        await state.set_state(NotifFSM.quick_adding)
+        await callback.message.edit_text(
+            f"⏰ <b>{hour:02d}:00–{hour + 1:02d}:00</b>  |  {date_str}\n\n"
+            "Выбери из недавних или введи своё:",
+            parse_mode="HTML",
+            reply_markup=notification_quick_keyboard(recent, date_str, hour),
+        )
+    else:
+        await state.set_state(ActivityFSM.waiting_description)
+        await callback.message.edit_text(
+            f"📝 Добавляем дело за <b>{hour:02d}:00–{hour + 1:02d}:00</b> ({date_str})\n\n"
+            "Опиши что ты делал:",
+            parse_mode="HTML",
+        )
+    await callback.answer()
 
 
 # ── FSM steps ─────────────────────────────────────────────────────────────────
