@@ -27,7 +27,7 @@ from database import (
     get_context_by_id, rename_context, update_context_color,
     count_context_activities, delete_context,
     get_export_activities, set_goal, delete_goal, get_goals_with_progress,
-    update_activity_tags, save_day_note, get_day_note, delete_day_note,
+    update_activity_tags, save_day_note, get_day_note, get_all_day_notes, delete_day_note,
     get_week_comparison,
     get_top_activities, get_streak, get_hour_patterns,
     get_templates, get_template_by_id, add_template, delete_template, increment_template_use,
@@ -48,6 +48,7 @@ from keyboards import (
     tags_keyboard, templates_keyboard, main_menu_keyboard,
     hour_picker_keyboard, hour_picker_day_keyboard,
     habits_keyboard, habit_action_keyboard, habits_manage_keyboard,
+    notes_list_keyboard, note_view_keyboard, note_day_picker_keyboard,
     duration_keyboard, settings_keyboard, snapshots_keyboard,
     snapshot_actions_keyboard, snap_restore_confirm_keyboard,
     reset_confirm_keyboard,
@@ -686,22 +687,93 @@ async def cmd_note(message: Message, state: FSMContext):
     if not await user_exists(message.from_user.id):
         await message.answer("Сначала зарегистрируйся: /start")
         return
-    user    = await get_user(message.from_user.id)
-    tz      = pytz.timezone(user[2])
-    today   = datetime.now(tz).date().isoformat()
-    existing = await get_day_note(message.from_user.id, today)
+    await state.clear()
+    notes = await get_all_day_notes(message.from_user.id)
+    if notes:
+        text = "📝 <b>Заметки</b>\n\nВыбери дату или создай новую:"
+    else:
+        text = "📝 <b>Заметки</b>\n\nЗаметок пока нет."
+    await message.answer(text, parse_mode="HTML", reply_markup=notes_list_keyboard(notes))
 
+
+@router.callback_query(F.data == "note_list")
+async def cb_note_list(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    notes = await get_all_day_notes(callback.from_user.id)
+    text = "📝 <b>Заметки</b>\n\nВыбери дату или создай новую:" if notes else "📝 <b>Заметок пока нет.</b>"
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=notes_list_keyboard(notes))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("note_view:"))
+async def cb_note_view(callback: CallbackQuery, state: FSMContext):
+    note_date = callback.data.split(":", 1)[1]
+    text = await get_day_note(callback.from_user.id, note_date)
+    await callback.message.edit_text(
+        f"📝 <b>{note_date}</b>\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=note_view_keyboard(note_date),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("note_edit:"))
+async def cb_note_edit(callback: CallbackQuery, state: FSMContext):
+    note_date = callback.data.split(":", 1)[1]
+    await state.set_state(NoteFSM.editing_text)
+    await state.update_data(note_date=note_date)
+    existing = await get_day_note(callback.from_user.id, note_date)
+    await callback.message.edit_text(
+        f"✏️ <b>Редактировать заметку за {note_date}:</b>\n\n<i>Текущий текст:</i>\n{existing}\n\nОтправь новый текст:",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("note_del:"))
+async def cb_note_del_cb(callback: CallbackQuery, state: FSMContext):
+    note_date = callback.data.split(":", 1)[1]
+    await delete_day_note(callback.from_user.id, note_date)
+    notes = await get_all_day_notes(callback.from_user.id)
+    text = "📝 <b>Заметки</b>\n\nВыбери дату или создай новую:" if notes else "📝 <b>Заметок пока нет.</b>"
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=notes_list_keyboard(notes))
+    await callback.answer("🗑 Удалено")
+
+
+@router.callback_query(F.data == "note_new")
+async def cb_note_new(callback: CallbackQuery, state: FSMContext):
+    user = await get_user(callback.from_user.id)
+    tz = pytz.timezone(user[2])
+    now = datetime.now(tz)
+    today_str = now.date().isoformat()
+    yesterday_str = (now.date() - timedelta(days=1)).isoformat()
+    await callback.message.edit_text(
+        "📝 <b>Новая заметка</b>\n\nЗа какой день?",
+        parse_mode="HTML",
+        reply_markup=note_day_picker_keyboard(today_str, yesterday_str),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("note_day:"))
+async def cb_note_day(callback: CallbackQuery, state: FSMContext):
+    note_date = callback.data.split(":", 1)[1]
+    existing = await get_day_note(callback.from_user.id, note_date)
     if existing:
-        await message.answer(
-            f"📝 <b>Заметка за {today}:</b>\n\n{existing}\n\n"
-            "Отправь новый текст чтобы изменить, или /note_del чтобы удалить.",
+        await state.set_state(NoteFSM.editing_text)
+        await state.update_data(note_date=note_date)
+        await callback.message.edit_text(
+            f"📝 <b>Заметка за {note_date} уже есть:</b>\n\n{existing}\n\nОтправь новый текст чтобы заменить:",
             parse_mode="HTML",
         )
     else:
-        await message.answer(f"📝 Напиши заметку за {today}:")
-
-    await state.set_state(NoteFSM.waiting_text)
-    await state.update_data(note_date=today)
+        await state.set_state(NoteFSM.waiting_text)
+        await state.update_data(note_date=note_date)
+        await callback.message.edit_text(
+            f"📝 <b>Заметка за {note_date}</b>\n\nНапиши что угодно — настроение, мысли, итог дня:",
+            parse_mode="HTML",
+        )
+    await callback.answer()
 
 
 @router.message(NoteFSM.waiting_text)
@@ -709,7 +781,25 @@ async def fsm_note_text(message: Message, state: FSMContext):
     data = await state.get_data()
     await save_day_note(message.from_user.id, data["note_date"], message.text.strip())
     await state.clear()
-    await message.answer(f"✅ Заметка за {data['note_date']} сохранена.")
+    notes = await get_all_day_notes(message.from_user.id)
+    await message.answer(
+        f"✅ Заметка за {data['note_date']} сохранена.\n\n📝 <b>Заметки</b>",
+        parse_mode="HTML",
+        reply_markup=notes_list_keyboard(notes),
+    )
+
+
+@router.message(NoteFSM.editing_text)
+async def fsm_note_edit_text(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await save_day_note(message.from_user.id, data["note_date"], message.text.strip())
+    await state.clear()
+    notes = await get_all_day_notes(message.from_user.id)
+    await message.answer(
+        f"✅ Заметка за {data['note_date']} обновлена.\n\n📝 <b>Заметки</b>",
+        parse_mode="HTML",
+        reply_markup=notes_list_keyboard(notes),
+    )
 
 
 @router.message(Command("note_del"))
@@ -719,7 +809,7 @@ async def cmd_note_del(message: Message, state: FSMContext):
     tz    = pytz.timezone(user[2])
     today = datetime.now(tz).date().isoformat()
     await delete_day_note(message.from_user.id, today)
-    await message.answer("✅ Заметка удалена.")
+    await message.answer("✅ Заметка за сегодня удалена.")
 
 
 # ── Edit / Delete ─────────────────────────────────────────────────────────────
@@ -1262,17 +1352,26 @@ def _parse_time(text: str) -> Optional[str]:
     return None
 
 
-async def _habits_screen(user_id: int, today_str: str, target, edit: bool = False):
+async def _habits_screen(
+    user_id: int, today_str: str, target,
+    edit: bool = False, selected_date: str = None,
+):
     await ensure_default_habits(user_id)
     habits   = await get_habits(user_id)
-    raw_logs = await get_habit_logs_today(user_id, today_str)
+    # Use selected_date for logs (today or yesterday)
+    display_date = selected_date if selected_date else today_str
+    raw_logs = await get_habit_logs_today(user_id, display_date)
     # Keep only last log per habit
     logs = {}
     for habit_id, ts, te, tv in raw_logs:
         logs[habit_id] = (ts, te, tv)
 
-    text = f"🗓 <b>Привычки — {today_str}</b>\n\nНажми на привычку чтобы записать:"
-    kb   = habits_keyboard(habits, logs)
+    from datetime import date, timedelta
+    yesterday_str = (date.fromisoformat(today_str) - timedelta(days=1)).isoformat()
+    selected = display_date
+
+    text = f"🗓 <b>Привычки — {display_date}</b>\n\nНажми на привычку чтобы записать:"
+    kb   = habits_keyboard(habits, logs, today_str, yesterday_str, selected)
     if edit:
         await target.edit_text(text, parse_mode="HTML", reply_markup=kb)
     else:
@@ -1287,15 +1386,29 @@ async def cmd_habits(message: Message, state: FSMContext):
     await state.clear()
     user     = await get_user(message.from_user.id)
     today    = datetime.now(pytz.timezone(user[2])).date().isoformat()
-    await _habits_screen(message.from_user.id, today, message)
+    await state.update_data(habits_selected_date=today, habits_today=today)
+    await _habits_screen(message.from_user.id, today, message, selected_date=today)
 
 
 @router.callback_query(F.data == "hb_back")
 async def cb_hb_back(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
     user  = await get_user(callback.from_user.id)
     today = datetime.now(pytz.timezone(user[2])).date().isoformat()
-    await _habits_screen(callback.from_user.id, today, callback.message, edit=True)
+    data  = await state.get_data()
+    await state.clear()
+    selected = data.get("habits_selected_date", today)
+    await state.update_data(habits_selected_date=selected, habits_today=today)
+    await _habits_screen(callback.from_user.id, today, callback.message, edit=True, selected_date=selected)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("hb_day:"))
+async def cb_hb_day(callback: CallbackQuery, state: FSMContext):
+    selected_date = callback.data.split(":", 1)[1]
+    user  = await get_user(callback.from_user.id)
+    today = datetime.now(pytz.timezone(user[2])).date().isoformat()
+    await state.update_data(habits_selected_date=selected_date, habits_today=today)
+    await _habits_screen(callback.from_user.id, today, callback.message, edit=True, selected_date=selected_date)
     await callback.answer()
 
 
@@ -1310,10 +1423,13 @@ async def cb_hb_select(callback: CallbackQuery, state: FSMContext):
     hid, name, habit_type, emoji = habit
     user     = await get_user(callback.from_user.id)
     today    = datetime.now(pytz.timezone(user[2])).date().isoformat()
-    raw_logs = await get_habit_logs_today(callback.from_user.id, today)
+    # Use selected_date from state if available
+    prev_data = await state.get_data()
+    log_date  = prev_data.get("habits_selected_date", today)
+    raw_logs = await get_habit_logs_today(callback.from_user.id, log_date)
     logged   = any(r[0] == habit_id for r in raw_logs)
 
-    await state.update_data(habit_id=habit_id, habit_type=habit_type, today=today)
+    await state.update_data(habit_id=habit_id, habit_type=habit_type, today=log_date)
 
     if habit_type == "travel":
         await state.set_state(HabitFSM.waiting_travel_from)
@@ -1414,12 +1530,16 @@ async def fsm_travel_arr(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("hb_del:"))
 async def cb_hb_del(callback: CallbackQuery, state: FSMContext):
-    habit_id = int(callback.data.split(":")[1])
-    user     = await get_user(callback.from_user.id)
-    today    = datetime.now(pytz.timezone(user[2])).date().isoformat()
-    await delete_habit_log(callback.from_user.id, habit_id, today)
+    habit_id  = int(callback.data.split(":")[1])
+    user      = await get_user(callback.from_user.id)
+    today     = datetime.now(pytz.timezone(user[2])).date().isoformat()
+    prev_data = await state.get_data()
+    log_date  = prev_data.get("habits_selected_date", today)
+    await delete_habit_log(callback.from_user.id, habit_id, log_date)
+    selected = log_date
     await state.clear()
-    await _habits_screen(callback.from_user.id, today, callback.message, edit=True)
+    await state.update_data(habits_selected_date=selected, habits_today=today)
+    await _habits_screen(callback.from_user.id, today, callback.message, edit=True, selected_date=selected)
     await callback.answer("🗑 Запись удалена")
 
 

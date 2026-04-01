@@ -369,6 +369,12 @@ async def get_or_create_context(user_id: int, name: str) -> Tuple[int, str]:
         return cur.lastrowid, color
 
 
+async def get_or_create_habits_context(user_id: int) -> int:
+    """Get or create the special 'Привычки' context for habit activities."""
+    ctx_id, _ = await get_or_create_context(user_id, "Привычки")
+    return ctx_id
+
+
 # ── Activities ────────────────────────────────────────────────────────────────
 
 async def add_activity(
@@ -421,6 +427,16 @@ async def get_day_note(user_id: int, note_date: str) -> Optional[str]:
         )
         row = await cur.fetchone()
         return row[0] if row else None
+
+
+async def get_all_day_notes(user_id: int) -> List[Tuple]:
+    """Returns [(note_date, text), ...] ordered by date desc."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            "SELECT note_date, text FROM day_notes WHERE user_id = ? ORDER BY note_date DESC",
+            (user_id,),
+        )
+        return await cur.fetchall()
 
 
 async def delete_day_note(user_id: int, note_date: str):
@@ -923,8 +939,47 @@ async def log_habit(
                VALUES (?,?,?,?,?,?)""",
             (user_id, habit_id, log_date, time_start, time_end, text_value),
         )
+        log_id = cur.lastrowid
         await db.commit()
-        return cur.lastrowid
+
+    # Also create an activity entry so habits appear in stats
+    habit = await get_habit_by_id(habit_id, user_id)
+    if habit:
+        _, name, habit_type, emoji = habit
+        # Build description
+        if habit_type == "travel" and text_value:
+            desc = f"{emoji} {name}: {time_start}–{time_end}" if time_start and time_end else f"{emoji} {name}: {text_value}"
+        elif time_start and time_end:
+            desc = f"{emoji} {name}: {time_start}–{time_end}"
+        elif time_start:
+            desc = f"{emoji} {name}: {time_start}"
+        else:
+            desc = f"{emoji} {name}"
+
+        # Calculate duration
+        duration = 30  # default
+        if time_start and time_end:
+            try:
+                sh, sm = int(time_start.split(":")[0]), int(time_start.split(":")[1])
+                eh, em = int(time_end.split(":")[0]), int(time_end.split(":")[1])
+                diff = (eh * 60 + em) - (sh * 60 + sm)
+                if diff > 0:
+                    duration = diff
+            except (ValueError, IndexError):
+                pass
+
+        # Derive hour slot from time_start if available, else use 0
+        hour_slot = 0
+        if time_start:
+            try:
+                hour_slot = int(time_start.split(":")[0])
+            except (ValueError, IndexError):
+                pass
+
+        ctx_id = await get_or_create_habits_context(user_id)
+        await add_activity(user_id, ctx_id, desc, duration, log_date, hour_slot)
+
+    return log_id
 
 
 async def delete_habit_log(user_id: int, habit_id: int, log_date: str):

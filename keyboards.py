@@ -250,11 +250,24 @@ def people_list_keyboard(people: List[Tuple]) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def habits_keyboard(habits: List[Tuple], logs: dict) -> InlineKeyboardMarkup:
+def habits_keyboard(
+    habits: List[Tuple], logs: dict,
+    today_str: str = "", yesterday_str: str = "", selected_date: str = "",
+) -> InlineKeyboardMarkup:
     """Main habits screen.
     habits: [(id, name, habit_type, emoji, sort_order), ...]
     logs:   {habit_id: (time_start, time_end, text_value)}"""
     builder = InlineKeyboardBuilder()
+    # Day selector at the top
+    if today_str and yesterday_str:
+        builder.button(
+            text="📅 Сегодня ✓" if selected_date == today_str else "📅 Сегодня",
+            callback_data=f"hb_day:{today_str}",
+        )
+        builder.button(
+            text="📅 Вчера ✓" if selected_date == yesterday_str else "📅 Вчера",
+            callback_data=f"hb_day:{yesterday_str}",
+        )
     for habit_id, name, habit_type, emoji, _ in habits:
         if habit_id in logs:
             ts, te, tv = logs[habit_id]
@@ -272,7 +285,10 @@ def habits_keyboard(habits: List[Tuple], logs: dict) -> InlineKeyboardMarkup:
         builder.button(text=label, callback_data=f"hb:{habit_id}")
     builder.button(text="➕ Своя привычка", callback_data="hb_new")
     builder.button(text="🗑 Управление",    callback_data="hb_manage")
-    builder.adjust(1)
+    if today_str and yesterday_str:
+        builder.adjust(2, *([1] * (len(habits) + 2)))
+    else:
+        builder.adjust(1)
     return builder.as_markup()
 
 
@@ -387,15 +403,19 @@ def delete_confirm_keyboard(act_id: int) -> InlineKeyboardMarkup:
 def hour_picker_keyboard(today_str: str, yesterday_str: str, current_hour: int) -> InlineKeyboardMarkup:
     """Grid of hours for manual add. Shows today and yesterday tabs + hour buttons."""
     builder = InlineKeyboardBuilder()
+    # Quick "now" button
+    builder.button(
+        text=f"⚡ Сейчас — {current_hour:02d}:00",
+        callback_data=f"addhour:{today_str}:{current_hour}",
+    )
     # Day selector
     builder.button(text="📅 Сегодня ✓", callback_data=f"addday:{today_str}:{current_hour}")
     builder.button(text="📅 Вчера",      callback_data=f"addday:{yesterday_str}:{current_hour}")
-    builder.adjust(2)
     # Hours 0–23, mark current hour
     for h in range(0, 24):
         label = f"▶ {h:02d}:00" if h == current_hour else f"{h:02d}:00"
         builder.button(text=label, callback_data=f"addhour:{today_str}:{h}")
-    builder.adjust(2, *([4] * 6))
+    builder.adjust(1, 2, *([4] * 6))
     return builder.as_markup()
 
 
@@ -403,6 +423,11 @@ def hour_picker_day_keyboard(date_str: str, today_str: str, yesterday_str: str, 
     """Same picker but with correct day selected."""
     builder = InlineKeyboardBuilder()
     is_today = date_str == today_str
+    # Quick "now" button
+    builder.button(
+        text=f"⚡ Сейчас — {current_hour:02d}:00",
+        callback_data=f"addhour:{date_str}:{current_hour}",
+    )
     builder.button(
         text="📅 Сегодня ✓" if is_today else "📅 Сегодня",
         callback_data=f"addday:{today_str}:{current_hour}",
@@ -411,11 +436,39 @@ def hour_picker_day_keyboard(date_str: str, today_str: str, yesterday_str: str, 
         text="📅 Вчера ✓" if not is_today else "📅 Вчера",
         callback_data=f"addday:{yesterday_str}:{current_hour}",
     )
-    builder.adjust(2)
     for h in range(0, 24):
         label = f"▶ {h:02d}:00" if h == current_hour else f"{h:02d}:00"
         builder.button(text=label, callback_data=f"addhour:{date_str}:{h}")
-    builder.adjust(2, *([4] * 6))
+    builder.adjust(1, 2, *([4] * 6))
+    return builder.as_markup()
+
+
+def notes_list_keyboard(notes: List[Tuple]) -> InlineKeyboardMarkup:
+    """notes: [(note_date, text), ...]"""
+    builder = InlineKeyboardBuilder()
+    for note_date, text in notes:
+        preview = text[:30] + "…" if len(text) > 30 else text
+        builder.button(text=f"📅 {note_date}  {preview}", callback_data=f"note_view:{note_date}")
+    builder.button(text="➕ Новая заметка", callback_data="note_new")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def note_view_keyboard(note_date: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="✏️ Изменить", callback_data=f"note_edit:{note_date}")
+    builder.button(text="🗑 Удалить",  callback_data=f"note_del:{note_date}")
+    builder.button(text="◀️ Назад",   callback_data="note_list")
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+
+def note_day_picker_keyboard(today_str: str, yesterday_str: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="📅 Сегодня",  callback_data=f"note_day:{today_str}")
+    builder.button(text="📅 Вчера",    callback_data=f"note_day:{yesterday_str}")
+    builder.button(text="◀️ Назад",    callback_data="note_list")
+    builder.adjust(2, 1)
     return builder.as_markup()
 
 

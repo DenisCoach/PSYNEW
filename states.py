@@ -30,6 +30,7 @@ class GoalFSM(StatesGroup):
 
 class NoteFSM(StatesGroup):
     waiting_text = State()
+    editing_text = State()   # editing existing note
 
 
 class NotifFSM(StatesGroup):
